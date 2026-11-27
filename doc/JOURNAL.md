@@ -27231,6 +27231,7 @@ level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83
   3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
   --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.
 
+
 ## 2026-11-26 — OCaml AOT: tail calls at the light level (queue 604, VM)
 
 The user's DECISION 603-1 (c) (2026-11-26): build tail calls at the light level so that parallel/mctest passes under the default

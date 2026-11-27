@@ -205,6 +205,7 @@
                     f (symbol (str (unit-class)) (name k))]
                 (swap! (:consts *unit*) conj [k (list 'Long/valueOf v)])
                 (swap! ints assoc v f)
+                (when-let [io (:int-of *unit*)] (swap! io assoc f v))
                 f)))
         (list 'Long/valueOf a))
       (if-let [blocks (and (= 'block h) (:blocks *unit*))]
@@ -284,7 +285,7 @@
                (or (str/starts-with? n "global ")
                    (and (str/starts-with? n "field_imm ") (simple? (first args)))))))))
 
-(declare scoped holds-call? take-form)
+(declare scoped holds-call? take-form unbox mentions? substitute let-chain)
 
 (defn- with-args
   "Evaluates arg nodes right to left (as ocamlc's code does) and calls (k forms): every argument
@@ -301,11 +302,34 @@
         body (k forms)]
     (if (seq bindings) (list 'let bindings (if clear? (scoped body (vals temps)) body)) body)))
 
+(def ^:private ^:dynamic *longs*
+  "(oc-light) The locals of the method being translated whose int value is also a long local: {Object local, long local} (a for
+  loop's index, a self loop's int parameters), read by unbox. Bound by the method (closure-class!) and by each loop over its
+  body: a nested function's field of the same name is its own."
+  {})
+
+(def ^:private ^:dynamic *mutlongs*
+  "(oc-light) The int variables (mutlet [int]) of the method being translated that are long locals: {variable, long local}."
+  {})
+
+(def ^:private ^:dynamic *self-arity*
+  "(oc-light) The arity of the function whose method is being translated (closure-class!), whose `this` is the function itself; nil
+  outside one or above six."
+  nil)
+
 (defn- call-form
   "The application of function form f to argument forms (already evaluated, simple). A closure is cast in place, Rt/fn called
-  only for another value (queue 414: at the light level each interpreted call is a frame)."
+  only for another value (queue 414: at the light level each interpreted call is a frame). (oc-light) A function's application
+  of itself (`this`) with its arity calls its method directly: no test of the value's class or arity."
   [f args0]
   (let [n (count args0) args args0]
+    (if (and (= 'this f) (= n *self-arity*) (not *in-ns*))
+      (let [big (into {} (keep-indexed (fn [i a] (when (holds-call? a) [i (with-meta (fresh "a$") {:mutable true :tag 'Object})])) args))
+            args (vec (map-indexed (fn [i a] (if-let [t (big i)] (take-form t) a)) args))
+            call (apply list (symbol (str ".a" n)) 'this args)]
+        (if (seq big)
+          (list 'let (vec (mapcat (fn [i] [(big i) (nth args0 i)]) (sort (keys big)))) call)
+          call))
     (if (<= 1 n 6)
       ;; (queue 603) the arguments are written in both branches: one that holds a call (with-args' leftmost argument that is not
       ;; simple, evaluated in place: a call of a call ...) is bound first, else the nested calls' forms doubled at each level
@@ -324,7 +348,7 @@
         (if (seq big)
           (list 'let (vec (mapcat (fn [i] [(big i) (nth args0 i)]) (sort (keys big)))) call)
           call))
-      (list 'ocaml.rt.Rt/ap f (list 'new 'Object/1 (vec args))))))
+      (list 'ocaml.rt.Rt/ap f (list 'new 'Object/1 (vec args)))))))
 
 (defn- take-form
   "Local t's value, t cleared as it is read (queue 603: the value is no slot's once passed)."
@@ -441,18 +465,45 @@
           (list 'if '(> (unchecked-subtract-int ocaml.rt.Rt/depth ocaml.rt.Rt/hopBase) ocaml.rt.Rt/TAIL_DEPTH) tail call)
           (list 'let [r call] (list 'if (list 'instance? 'ocaml.rt.Tail r) (list 'ocaml.rt.Rt/bounce (take-form r)) r)))))
 
+(defn- bt-push
+  "Bt/push of slot ev. (oc-light) At the light level in place, its fast path: each interpreted call of Bt/push was a frame, about a
+  tenth of a call's cost; the method is called only to grow the stack."
+  [ev]
+  (if *in-ns*
+    (list 'ocaml.rt.Bt/push ev)
+    (list 'if '(< ocaml.rt.Bt/sp (alength ocaml.rt.Bt/stk))
+          (list 'do (list 'aset 'ocaml.rt.Bt/stk 'ocaml.rt.Bt/sp ev) '(set! ocaml.rt.Bt/sp (unchecked-inc-int ocaml.rt.Bt/sp)))
+          (list 'ocaml.rt.Bt/push ev))))
+
 (defn- around-slot "Form f run with slot ev entered, then temporaries ts cleared." [ev f & [ts]]
-  (list 'do (list 'ocaml.rt.Bt/push ev) (value-then f (concat (clear ts) [bt-pop]))))
+  (list 'do (bt-push ev) (value-then f (concat (clear ts) [bt-pop]))))
+
+(defn- passing
+  "(oc-light) Argument forms as of a call that is no tail call with the temporaries among them (mutable t$ locals: with-args',
+  with-all-args') cleared as they are passed: the last argument's form clears the others' (the call has read them) and is read
+  and cleared itself when a temporary (take-form). At the light level the frame's slot kept an argument the callee alone holds for
+  the whole call, cleared only after it: match-exception/streams' stream head, the whole forced stream reachable through the
+  10,000,000 iterations, every collection marking it (as ocamlopt's caller frame holds no argument it passed)."
+  [as]
+  (let [as (vec as)
+        temp? (fn [a] (and (symbol? a) (:mutable (meta a)) (str/starts-with? (name a) "t$")))
+        ts (filterv temp? as)]
+    (if (or *in-ns* (empty? as) (empty? ts) (holds-call? (peek as)))
+      as
+      (let [l (peek as)
+            others (distinct (remove #(= % l) ts))
+            l2 (if (temp? l) (take-form l) l)]
+        (conj (pop as) (if (seq others) (concat (list 'do) (clear others) [l2]) l2))))))
 
 (defn- apply-ev-node
   "A non-tail application with an after-event: its slot entered once the arguments and the function are evaluated (bytegen's
   APPLY1-3), before the arguments for four or more (PUSH_RETADDR)."
   [ctx [f args] ev]
   (if (>= (count args) 4)
-    (list 'do (list 'ocaml.rt.Bt/push ev)
+    (list 'do (bt-push ev)
           (with-all-args ctx (into [f] args)
-                         (fn [as ts] (value-then (call-form (first as) (rest as)) (concat (clear ts) [bt-pop])))))
-    (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (rest as)) ts)))))
+                         (fn [as ts] (value-then (call-form (first as) (passing (rest as))) (concat (clear ts) [bt-pop])))))
+    (with-all-args ctx (into [f] args) (fn [as ts] (around-slot ev (call-form (first as) (passing (rest as))) ts)))))
 
 (declare prim-value const-arg)
 (def ^:private ^:dynamic *simple-args* "Whether the primitive's argument nodes are all simple (prim-node), or all
@@ -491,11 +542,52 @@
                 (#{'apply 'prim} (hd inner)) [x (slot-ref info true false)]
                 :else [inner (slot-ref info true false)]))))))
 
+(defn- self-continue
+  "(oc-light) A self tail call's continue to the loop whose int parameters (indexes of longs) are longs (closure-class!): the
+  arguments right to left, as with-args (every one that is not simple but the leftmost such one into a temporary first, from the
+  right), an int parameter's as its long (unbox: an int primitive's value is not boxed)."
+  [ctx label args longs]
+  (let [impure (keep-indexed (fn [i x] (when-not (simple? x) i)) args)
+        bind (set (rest impure))
+        val (fn [i] (let [v (expr ctx (nth args i) false)] (if (longs i) (unbox v) v)))
+        temps (into {} (for [i bind] [i (with-meta (fresh "t$") (if (longs i) {:tag 'long} {}))]))
+        forms (vec (map-indexed (fn [i _] (or (temps i) (val i))) args))
+        bindings (vec (mapcat (fn [i] [(temps i) (val i)]) (reverse (sort bind))))
+        body (apply list 'continue label forms)]
+    (if (seq bindings) (list 'let bindings body) body)))
+
+(defn- loop-init
+  "(oc-light) A self loop's initial value of its parameter p: at the light level p read and cleared (take-form; the method's
+  parameter p mutable), so that the method's parameter slot, which the loop's own local shadows, does not keep the first value
+  through the whole loop (match-exception/streams' iter_stream_match: the stream's head, and so every element forced, reachable
+  through its 10,000,000 turns, the collector's marking growing with it); the compiled level reads p (Go's liveness)."
+  [p]
+  (if *in-ns* p (take-form p)))
+
+(defn- substitute
+  "Form x with the symbols of map m replaced by their forms."
+  [x m]
+  (cond (symbol? x) (if (contains? m x) (get m x) x)
+        (seq? x) (with-meta (apply list (map #(substitute % m) x)) (meta x))
+        (vector? x) (with-meta (mapv #(substitute % m) x) (meta x))
+        (map? x) (with-meta (into (empty x) (map (fn [[k v]] [(substitute k m) (substitute v m)]) x)) (meta x))
+        :else x))
+
+(defn- self-applies?
+  "Whether Lambda node x applies function id to n arguments."
+  [x id n]
+  (cond (seq? x) (or (and (= 'apply (first x)) (let [[f as] (node-body x)] (and (= 'var (hd f)) (= id (second f)) (= n (count as)))))
+                     (boolean (some #(self-applies? % id n) x)))
+        (vector? x) (boolean (some #(self-applies? % id n) x))
+        :else false))
+
 (defn- apply-node [ctx [f args] tail?]
   (let [self (:self ctx)]
     (if (and tail? self (= 'var (hd f)) (= (second f) (:id self)) (= (count args) (:arity self)))
       (do (reset! (:used self) true)
-          (with-args ctx args (fn [as] (apply list 'continue (:label self) as))))
+          (if-let [longs (not-empty (:longs self))]
+            (self-continue ctx (:label self) args longs)
+            (with-args ctx args (fn [as] (apply list 'continue (:label self) as)))))
       ;; a tail call of another function of the letrec group (OC84 (c)): a TailCall the group function's entry bounces
       (if (and tail? (:group ctx) (= 'var (hd f)) (= (get (:group ctx) (second f)) (count args)))
         (do (reset! (:tails ctx) true)
@@ -513,9 +605,9 @@
                    (and tail? (not *in-ns*))
                    (with-all-args ctx (into [f] args) (fn [as ts] (tail-form (first as) (rest as) ts)))
                    (simple? f)
-                   (with-args ctx args (fn [as] (call-form (expr ctx f false) as)) (not tail?))
+                   (with-args ctx args (fn [as] (call-form (expr ctx f false) (if tail? as (passing as)))) (not tail?))
                    :else
-                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (rest as))) (not tail?)))]
+                   (with-args ctx (into [f] args) (fn [as] (call-form (first as) (if tail? (rest as) (passing (rest as))))) (not tail?)))]
         (if clears (list 'do (apply list 'o2j$clears clears) call) call))))))
 
 ;; ---- functions
@@ -527,7 +619,7 @@
           (into ['this] (if mutable? (map #(with-meta % {:mutable true}) params) params)) body)
     (let [a (symbol "args$")]
       (list 'method (with-meta 'an {:public true}) ['this (with-meta a {:tag 'Object/1})]
-            (list 'let (vec (mapcat (fn [i p] [p (list 'aget a i)]) (range) params)) body)))))
+            (list 'let (vec (mapcat (fn [i p] [(if mutable? (with-meta p {:mutable true}) p) (list 'aget a i)]) (range) params)) body)))))
 
 (defn- closure-class!
   "Defines the member class of function node f (its free variables fields, self-id's references
@@ -545,15 +637,34 @@
         used (atom false)
         lbl (keyword (str "self" (swap! (:n *unit*) inc)))
         tails (atom false)
-        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity})
+        ;; (oc-light) a function that may loop on itself (a self application of its arity): its int parameters ([int]) also as
+        ;; longs, which the int primitives read (unbox, *longs*) and its loop carries (self-continue)
+        longs (when (and (not *in-ns*) self-id (self-applies? body self-id arity))
+                (into {} (keep-indexed (fn [i [_ k]] (when (= "[int]" k) [i (fresh "l$")])) ps)))
+        ictx {:env env :exits {} :self (when self-id {:id self-id :label lbl :used used :arity arity :longs longs})
               :group (not-empty (dissoc group self-id)) :tails tails
               ;; (oc-tail) the method's own parameters (arity 6 at most), which a tail call clears when it does not name them
               :params (when (<= arity 6) (mapv (fn [[p] s] [p s]) ps params))}
-        b (realize (expr ictx body true))
+        b (binding [*self-arity* (when (and self-id (<= arity 6)) arity)
+                    *longs* (into {} (map (fn [[i l]] [(nth params i) l]) longs))
+                    *mutlongs* {}]
+            (realize (expr ictx body true)))
         clears? (and (not @used) (not @tails) (not (:group ictx)) (<= arity 6))
         b (tail-clears b clears?)
         ;; a self tail call's loop ticks each turn (Rt/tick: other domains get the lock)
-        b (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p p]) params)) (concat (list 'do) tick-forms [b]))) b)
+        b (if (empty? longs)
+            (if @used (list 'label lbl (list 'loop (vec (mapcat (fn [p] [p (loop-init p)]) params)) (concat (list 'do) tick-forms [b]))) b)
+            ;; (oc-light) the int parameters' longs: the loop's (the parameter's boxed value bound in each turn when the body names
+            ;; it), else bound once at the entry
+            (let [b (realize b)
+                  ;; each use of an int parameter as a value (a result, a call's argument) its long boxed there
+                  sub (into {} (map (fn [[i l]] [(nth params i) (list 'cast 'Object l)]) longs))
+                  inner (if @used (substitute b sub) b)]
+              (if @used
+                (list 'label lbl (list 'loop (vec (mapcat (fn [i p] (if-let [l (longs i)] [(with-meta l {:tag 'long}) (unbox p)] [p (loop-init p)])) (range) params))
+                                       (concat (list 'do) tick-forms [inner])))
+                (let [ls (vec (mapcat (fn [[i l]] (when (mentions? b l) [(with-meta l {:tag 'long}) (unbox (nth params i))])) (sort longs)))]
+                  (if (seq ls) (list 'let ls b) b)))))
         ;; a function of a letrec group of several (OC84 (c)): its body the method tb, which returns a TailCall for a tail call
         ;; of another of the group; its entry calls tb and bounces (Rt/bounce: each TailCall's function's tb in turn, in one
         ;; frame). Every function of such a group has a tb, being a TailCall's target or not
@@ -562,7 +673,7 @@
         tb (when @tails
              (list 'method (with-meta 'tb {:public true}) ['this (with-meta a {:tag 'Object/1})]
                    ;; (queue 604) a group function's body returns to its entry's bounce: its tail calls may return Tails (ok$)
-                   (list 'let (vec (concat (when-not *in-ns* '[ok$ true]) (mapcat (fn [i p] [p (list 'aget a i)]) (range) params))) b)))
+                   (list 'let (vec (concat (when-not *in-ns* '[ok$ true]) (mapcat (fn [i p] [(if (and @used (not *in-ns*)) (with-meta p {:mutable true}) p) (list 'aget a i)]) (range) params))) b)))
         b (if @tails (list 'ocaml.rt.Rt/bounce (list '.tb 'this (list 'new 'Object/1 params))) b)
         ;; the call depth (OC92 (a)): counted on entry, given back on the way out (entered)
         b (entered b params)]
@@ -574,7 +685,7 @@
             [(concat (list 'constructor (with-meta (into ['this] fields) {:public true})
                            (list 'super. arity))
                      (for [fl fields] (list 'set! (list (symbol (str ".-" fl)) 'this) fl)))
-             (method-for arity params b clears?)
+             (method-for arity params b (or clears? (and @used (not *in-ns*))))
              ;; Marshal's Closures flag (OC216 (a); ocaml.rt.Marshal's closureFields, fixClosures): the free variables, a closure
              ;; of the class with none set, and their setting
              (list 'method (with-meta 'envOf {:public true}) (with-meta ['this] {:tag 'Object/1})
@@ -625,9 +736,19 @@
                 k (const-arg ctx def)
                 ctx2 (cond-> (assoc-in ctx [:env id] s) k (assoc-in [:kconst id] k) (nil? k) (update :kconst dissoc id))]
             (recur body ctx2 (conj bindings s (expr ctx def false))))
-      mutlet (let [[_ id def body] (node-body x)
-                   s (with-meta (munge-id id) {:mutable true :tag 'Object})]
-               (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))
+      mutlet (let [[kind id def body] (node-body x)]
+               (if (and (not *in-ns*) (= "[int]" kind))
+                 ;; (oc-light) an int variable a long local at the light level: the int primitives read it (*longs*), an
+                 ;; assignment sets it (*mutlongs*), a use as a value boxes it there; the chain goes on inside
+                 (let [ml (fresh "m$") s (munge-id id)
+                       init (unbox (expr ctx def false))
+                       inner (binding [*longs* (assoc *longs* s ml) *mutlongs* (assoc *mutlongs* s ml)]
+                               (realize (let-chain (assoc-in ctx [:env id] s) body tail?)))
+                       inner (substitute inner {s (list 'cast 'Object ml)})]
+                   (list 'let (conj bindings (with-meta ml {:tag 'long :mutable true}) init)
+                         (if tail? inner (scoped inner (take-nth 2 bindings)))))
+                 (let [s (with-meta (munge-id id) {:mutable true :tag 'Object})]
+                   (recur body (assoc-in ctx [:env id] (munge-id id)) (conj bindings s (expr ctx def false))))))
       (list 'let bindings (if tail?
                             (expr ctx x tail?)
                             (scoped (expr ctx x tail?) (take-nth 2 bindings)))))))
@@ -636,7 +757,7 @@
 
 (defn- num-arg [^String n] (Long/parseLong (first (str/split (str/trim (subs n (inc (.indexOf n " ")))) #"\s+"))))
 
-(declare inline-prim)
+(declare inline-prim light-prim)
 
 (defn- rt [m & args]
   (or (inline-prim m args)
@@ -657,8 +778,22 @@
 (defn- unbox
   "A Long's long; an inlined int primitive's value (boxed by (cast Object ...), queue 453) unboxed by taking its long."
   [x]
-  (if (and (seq? x) (= 'cast (first x)) (= 'Object (second x)) (seq? (nth x 2 nil)) (= 'bit-shift-right (first (nth x 2))))
+  (cond
+    (and (seq? x) (= 'cast (first x)) (= 'Object (second x)) (seq? (nth x 2 nil))
+         (or (= 'bit-shift-right (first (nth x 2)))
+             ;; (oc-light) the light level's other inlined int primitives (inline-prim)
+             (and (not *in-ns*) (#{'bit-and 'bit-or 'bit-xor 'long 'if} (first (nth x 2))))))
     (nth x 2)
+    ;; (oc-light) an int constant's value in place, a literal: its static field's read, cast and unboxing were three of the
+    ;; interpreter's nodes an operand (a loop's bound, a counter's step)
+    (and (not *in-ns*) (symbol? x) (contains? (some-> (:int-of *unit*) deref) x))
+    (get @(:int-of *unit*) x)
+    ;; (oc-light) a for loop's index: the loop's long (for-index-body)
+    (and (not *in-ns*) (symbol? x) (contains? *longs* x))
+    (get *longs* x)
+    (and (not *in-ns*) (seq? x) (= 'Long/valueOf (first x)) (integer? (second x)) (nil? (nnext x)))
+    (long (second x))
+    :else
     (list 'long (list 'cast 'Long x))))
 
 (defn- inline-prim
@@ -685,7 +820,91 @@
         (bind-vals [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x)
                                        (list 'aget (list '.-f (list 'cast 'ocaml.rt.Block x)) n)
                                        (slow x n)))))
-      :else nil)))
+      *in-ns* nil
+      :else (light-prim m args slow))))
+
+(def ^:private MIN-LONG Long/MIN_VALUE)
+
+(defn- boxl
+  "(oc-light) A long form as an OCaml int (boxed by a cast to Object); unbox takes the long back without a cast (its heads: the
+  light level's casts to Object are this function's alone)."
+  [x]
+  (list 'cast 'Object x))
+
+(defn- wrap63 [x] (list 'bit-shift-right (list 'bit-shift-left x 1) 1))
+
+(defn- light-prim
+  "(oc-light) The light level's further primitives in place, each a call of an interpreted Rt method (a frame) before: the int
+  operations, physical equality's int case, a block's field set, an array's and a string's element and length. The fast path for
+  the representation OCaml's types give (a Long, a Block, a byte array), Rt's method for any other value, which does what it did
+  (its error, its other representations); an operand that is not a Long fails its cast, as add's (queue 453). Nil when m has none."
+  [m args slow]
+  (let [[a b c] args
+        ;; an operand used twice is a local or an int primitive's form (pure), never bound to a local of its own: a let's slot kept
+        ;; the value it held for the frame's life (weak-ephe-final/ephetest's test7, its ephemeron the argument of a primitive);
+        ;; another operand (a call's result evaluated in place) leaves the primitive to Rt's method
+        plain (fn [xs k] (when (every? #(or (symbol? %) (and (seq? %) (= 'cast (first %)) (= 'Object (second %)))) xs) (k xs)))
+        blk (fn [x] (list '.-f (list 'cast 'ocaml.rt.Block x)))
+        bytes (fn [x] (list 'cast 'byte/1 x))
+        idx (fn [x] (list 'unchecked-int (unbox x)))]
+    (case m
+      neg (boxl (wrap63 (list 'unchecked-negate (unbox a))))
+      land (boxl (list 'bit-and (unbox a) (unbox b)))
+      lor (boxl (list 'bit-or (unbox a) (unbox b)))
+      lxor (boxl (list 'bit-xor (unbox a) (unbox b)))
+      lsl (boxl (wrap63 (list 'bit-shift-left (unbox a) (list 'bit-and (unbox b) 63))))
+      lsr (boxl (wrap63 (list 'unsigned-bit-shift-right (list 'bit-and (unbox a) Long/MAX_VALUE) (list 'bit-and (unbox b) 63))))
+      asr (let [s (fresh "s$")]
+            (list 'let [(with-meta s {:tag 'long}) (unbox b)]
+                  (boxl (list 'bit-shift-right (unbox a) (list 'if (list 'or (list '< s 0) (list '> s 62)) 62 s)))))
+      (div mod) (plain [a b] (fn [[a b]]
+                  (let [y (fresh "y$")]
+                    (list 'let [(with-meta y {:tag 'long}) (unbox b)]
+                          (list 'if (list '== y 0)
+                                (slow a b)
+                                (boxl (wrap63 (list (if (= m 'div) 'unchecked-divide 'unchecked-remainder) (unbox a) y))))))))
+      compareInts (let [x (fresh "x$") y (fresh "y$")]
+                    (list 'let [(with-meta x {:tag 'long}) (unbox a) (with-meta y {:tag 'long}) (unbox b)]
+                          (boxl (list 'if (list '< x y) -1 (list 'if (list '> x y) 1 0)))))
+      ;; isout: (unsigned) b > a, the signed comparison of both with the sign bit flipped (Long/compareUnsigned is a host call)
+      isout (list '> (list 'bit-xor (unbox b) MIN-LONG) (list 'bit-xor (unbox a) MIN-LONG))
+      isint (list 'instance? 'Long a)
+      eq (plain [a b] (fn [[x y]] (list 'if (list 'identical? x y) true
+                                            (list 'if (list 'and (list 'instance? 'Long x) (list 'instance? 'Long y))
+                                                  (list '== (unbox x) (unbox y))
+                                                  (slow x y)))))
+      setField (plain [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x)
+                                              (list 'do (list 'aset (blk x) b c) UNIT)
+                                              (slow x b c))))
+      aget (plain [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x) (list 'aget (blk x) (idx b)) (slow x b))))
+      aset (plain [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x) (list 'do (list 'aset (blk x) (idx b) c) UNIT) (slow x b c))))
+      agetChecked (plain [a b] (fn [[x b]] (let [k (fresh "k$")]
+                                             (list 'let [(with-meta k {:tag 'long}) (unbox b)]
+                                                   (list 'if (list 'and (list 'instance? 'ocaml.rt.Block x) (list '>= k 0) (list '< k (list 'alength (blk x))))
+                                                         (list 'aget (blk x) (list 'unchecked-int k))
+                                                         (slow x b))))))
+      asetChecked (plain [a b] (fn [[x b]] (let [k (fresh "k$")]
+                                             (list 'let [(with-meta k {:tag 'long}) (unbox b)]
+                                                   (list 'if (list 'and (list 'instance? 'ocaml.rt.Block x) (list '>= k 0) (list '< k (list 'alength (blk x))))
+                                                         (list 'do (list 'aset (blk x) (list 'unchecked-int k) c) UNIT)
+                                                         (slow x b c))))))
+      alenv (plain [a] (fn [[x]] (list 'if (list 'instance? 'ocaml.rt.Block x) (boxl (list 'long (list 'alength (blk x)))) (slow x))))
+      slen (boxl (list 'long (list 'alength (bytes a))))
+      sget (boxl (list 'bit-and (list 'long (list 'aget (bytes a) (idx b))) 255))
+      sgetChecked (plain [a b] (fn [[a b]]
+                    (let [k (fresh "k$")]
+                      (list 'let [(with-meta k {:tag 'long}) (unbox b)]
+                            (list 'if (list 'and (list '>= k 0) (list '< k (list 'alength (bytes a))))
+                                  (boxl (list 'bit-and (list 'long (list 'aget (bytes a) (list 'unchecked-int k))) 255))
+                                  (slow a b))))))
+      sset (list 'do (list 'aset (bytes a) (idx b) (list 'unchecked-byte (unbox c))) UNIT)
+      ssetChecked (plain [a b] (fn [[a b]]
+                    (let [k (fresh "k$")]
+                      (list 'let [(with-meta k {:tag 'long}) (unbox b)]
+                            (list 'if (list 'and (list '>= k 0) (list '< k (list 'alength (bytes a))))
+                                  (list 'do (list 'aset (bytes a) (list 'unchecked-int k) (list 'unchecked-byte (unbox c))) UNIT)
+                                  (slow a b c))))))
+      nil)))
 
 (def ^:private int-ops
   {"~" 'neg "+" 'add "-" 'sub "*" 'mul "/" 'div "/u" 'div "mod" 'mod "mod_unsafe" 'mod "and" 'land
@@ -969,17 +1188,34 @@
                             (list 'ocaml.rt.Bt/unwind bs)
                             (expr (assoc-in ctx [:env id] s) handler tail?)))))))
 
+(defn- mentions? "Whether form x holds symbol s." [x s]
+  (cond (symbol? x) (= x s)
+        (or (seq? x) (vector? x)) (boolean (some #(mentions? % s) x))
+        (map? x) (boolean (some #(mentions? % s) (concat (keys x) (vals x))))
+        :else false))
+
+(defn- for-index-body
+  "A for loop's body b with its index's boxed value s of the loop's long i. (oc-light) At the light level the int primitives read i
+  itself (unbox, *longs*), and s is bound only when b still names it (a call's argument, a stored value)."
+  [s i b]
+  (if *in-ns*
+    (list 'let [(with-meta s {:tag 'Object}) i] b)
+    (if (mentions? b s) (list 'let [(with-meta s {:tag 'Object}) i] b) b)))
+
 (defn- for-node [ctx [id lo hi dir body]]
   (let [l (fresh "lo$") h (fresh "hi$") i (fresh "i$") s (munge-id id)
         up (= dir :to)
         lv (fresh "lv$") hv (fresh "hv$")]
     ;; the bounds unboxed once (queue 414)
     (list 'let [l (expr ctx lo false) h (expr ctx hi false)]
-          (list 'let [(with-meta lv {:tag 'long}) (rt 'l l) (with-meta hv {:tag 'long}) (rt 'l h)]
+          (list 'let [(with-meta lv {:tag 'long}) (if *in-ns* (rt 'l l) (unbox l)) (with-meta hv {:tag 'long}) (if *in-ns* (rt 'l h) (unbox h))]
                 (list 'when (list (if up '<= '>=) lv hv)
                       (concat (list 'loop [(with-meta i {:tag 'long}) lv])
                             tick-forms
-                            [(list 'let [(with-meta s {:tag 'Object}) i] (expr (assoc-in ctx [:env id] s) body false))
+                            [(for-index-body s i (if *in-ns*
+                                                   (expr (assoc-in ctx [:env id] s) body false)
+                                                   (binding [*longs* (assoc *longs* s i)]
+                                                     (realize (expr (assoc-in ctx [:env id] s) body false)))))
                              (list 'when (list 'not (list '== i hv))
                                    (list 'recur (list (if up 'unchecked-inc 'unchecked-dec) i)))])))
           UNIT)))
@@ -1009,7 +1245,10 @@
                  (concat (list 'do) (map #(expr ctx % false) (butlast xs)) [(expr ctx (last xs) tail?)]))
       while (let [[c body] b] (list 'do (concat (list 'while (test-form ctx c)) tick-forms [(expr ctx body false)]) UNIT))
       for (for-node ctx b)
-      assign (let [[id e] b] (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT))
+      assign (let [[id e] b]
+               (if-let [ml (get *mutlongs* (lookup ctx id))]
+                 (list 'do (list 'set! ml (unbox (expr ctx e false))) UNIT)
+                 (list 'do (list 'set! (lookup ctx id) (expr ctx e false)) UNIT)))
       send (let [[kind m o args] b
                  ts (vec (repeatedly (count args) #(fresh "t$")))
                  ov (fresh "o$") mv (fresh "m$")]
@@ -1030,7 +1269,7 @@
   [{:keys [name code]}]
   (let [cls (symbol (last (str/split (class-of name) #"\.")))]
     (binding [*unit* {:class (symbol (class-of name)) :name name :n (atom 0)
-                      :classes (atom []) :consts (atom []) :ints (atom {}) :blocks (atom {}) :slots (atom []) :missing (atom {})}]
+                      :classes (atom []) :consts (atom []) :ints (atom {}) :int-of (atom {}) :blocks (atom {}) :slots (atom []) :missing (atom {})}]
       (let [[_ [body]] (node-body code)
             init (realize (expr {:env {} :exits {}} body false))
             classes (mapv realize @(:classes *unit*))
@@ -1225,12 +1464,36 @@
           (symbol? x) (strip x)
           :else x)))
 
+(def ^:private java-lang
+  "(oc-light) The java.lang classes the forms name by their simple names."
+  #{"Object" "Long" "Double" "Integer" "Boolean" "String" "Throwable" "Runnable" "Character" "Byte" "Math" "System" "Thread"
+    "Short" "Float" "Number" "StringBuilder" "RuntimeException" "Exception" "Error" "StackOverflowError" "Class"})
+
+(defn- qualified
+  "(oc-light) Form x with java.lang's classes named in full (java.lang.Object, java.lang.Long/valueOf, java.lang.Object/1, the
+  type hints' too): the light level's loader resolves a simple class name in the unit's own package first, ocaml.u's, whose miss is
+  a ClassNotFoundException with its stack trace, a third of a Printf program's load (its CamlinternalFormat) before."
+  [x]
+  (let [q (fn [y] (if-let [m (meta y)]
+                    (let [t (:tag m)
+                          t2 (if (and (symbol? t) (nil? (namespace t)) (java-lang (name t))) (symbol (str "java.lang." (name t)))
+                                 (if (and (symbol? t) (namespace t) (java-lang (namespace t))) (symbol (str "java.lang." (namespace t)) (name t)) t))]
+                      (if (identical? t t2) y (with-meta y (assoc m :tag t2))))
+                    y))]
+    (cond (seq? x) (q (with-meta (apply list (map qualified x)) (meta x)))
+          (vector? x) (q (with-meta (mapv qualified x) (meta x)))
+          (map? x) (q (with-meta (into (empty x) (map (fn [[k v]] [(qualified k) (qualified v)]) x)) (meta x)))
+          (symbol? x) (q (cond (and (nil? (namespace x)) (java-lang (name x))) (with-meta (symbol (str "java.lang." (name x))) (meta x))
+                               (and (namespace x) (java-lang (namespace x))) (with-meta (symbol (str "java.lang." (namespace x)) (name x)) (meta x))
+                               :else x))
+          :else x)))
+
 (defn write-forms [^File f forms header]
   (io/make-parents f)
   (with-open [w (io/writer f)]
     (binding [*out* w *print-meta* true *print-length* nil *print-level* nil]
       (println (str ";; " header))
-      (doseq [x forms] (newline) (prn (unlined x))))))
+      (doseq [x forms] (newline) (prn (if *in-ns* (unlined x) (qualified (unlined x))))))))
 
 ;; ---------------------------------------------------------------------------------------------
 ;; linking (oi's Link, run.go): the library units a program needs, in the library's order
