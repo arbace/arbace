@@ -9615,3 +9615,26 @@ launcher; a train-9 worktree for the measurements), the Go fixes verified native
   tracker was launched again and `_pid` named the dead one (/proc: the pipe's holders, the tracker and its
   compile-server). compiler.sh now closes each descriptor above 2 without O_CLOEXEC (its fdinfo flags) before its exec.
   On train 9's executable with this bin/pyi: the two rows pass (`bin/pyi check --only`, the host's driver).
+  `c68758937` makes that loop silent: as first written it printed "can't open /proc/PID/fdinfo/3" (the glob's own
+  directory) on every compiled program's stderr when its host compiler started.
+- **test_datetime's ZoneInfoTest_Fast.test_gaps** (`532698694`, pyctypes' world.go): 11.4 s alone on train 9's
+  executable (`bin/pyi check --only`), about 300 s in the module's order on train 9 and on de740ca45's pyctypes alike
+  (test_folds 254 s and TestTimezoneConversions_Fast.test_easy 372 s before it): de740ca45 does not explain it. perf on the
+  driver: 70% in syncAllToC and syncAllFromC, which walk every mirror at each World.Call, and the mirrors grew over the
+  module (1,300 to 9,300 in its first minutes, IsoCalendarDate tuples and ints). datetime's isocalendar() allocates an
+  IsoCalendarDate, a C type over tuple (bornNew: its mirror in the map, mr.o the instance); the release of a handle whose
+  count is 0 skipped such an instance (its memory is its own, freed by its tp_dealloc once Go collects it) but left its
+  mirror in the map, which held the instance, so Go never collected it: every call leaked the instance and its items'
+  mirrors (1,000 calls a round: 0.74, 2.0, 3.1, 4.4, 5.6 s). The release takes the mirror out of the map now (the born
+  record keeps it; bornHandle puts it back and writes it to C when C is given the instance again). A speed fix, not a
+  limit: the 1.5 x rule over its 11.4 s alone gives a limit under the default 300 s. Natively, test_datetime's 548 _Fast
+  tests in order run in about 2 minutes where they took 16, the mirrors flat (about 1,430), test_gaps and test_folds ok,
+  the one failure the record's (CapiTest_Fast.test_type_check_in_subinterp); the same on the branch's own runtime (train 9's
+  pyctypes with this change and 9758cb8e6), 548 tests in about 2 minutes.
+- **spawn's test_processes WithProcessesTestPool.test_async_timeout and forkserver's WithProcessesTestProcess.test_interrupt**
+  (open): both pass alone on train 9's executable (`bin/pyi check --only`, 4 s and 6 s), with 7bd8941e0's compiler.sh and
+  without it, so their hang needs the module's order (the 700 s, 38 GB process modules under the big lock), not run here.
+  Candidates for that run: the compile servers that inherited a child's pass_fds pipes (7bd8941e0: a terminated or
+  interrupted child's compile server keeping its sentinel's or queue's write end open would leave the parent waiting for
+  EOF), finHeld's spent budget (9758cb8e6: a `del` of a pool's or a process's object missing its moment), and the mirrors'
+  growth (532698694); de740ca45 is not the cause of idle hangs (it removes CPU time, and these are idle).
