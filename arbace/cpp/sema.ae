@@ -216,7 +216,7 @@
 ;; namespace; and two of them differ. A namespace-scope directive at or after *cutoff* is not in force yet.
 (def ^:dynamic *cx-udir-pos* nil) ; IdentityHashMap: a scope's :usings list -> IdentityHashMap {nominee's :names -> the directive's position}
 
-(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend? cx-qual-type-access! cx-qual-type-names)
+(declare cx-type-key lookup-qualified lookup check-type-access! class-id cx-incomplete-cls cx-type-friend? cx-qual-type-access! cx-qual-type-names cx-sub-classes cx-access-ok?)
 
 (defn- cx-udir-visible? [s u]
   (or (not= :ns (:kind s))
@@ -4427,7 +4427,29 @@
         (nil? d) (let [virt (some #(let [b (abi/cls (:cls %))] (and (:dtor b) (:virtual (fnd (:dtor b))))) (:bases c))
                        fid (implicit-fn! id :dtor (str "~" (:name c)) {:k :fn :ret abi/void :ps [] :va false}
                                          :trivial (not (or nontriv virt)) :virtual (boolean virt))]
-                   (when virt (abi/update-cls! id update :virtuals (fnil conj []) fid)))
+                   (when virt (abi/update-cls! id update :virtuals (fnil conj []) fid))
+                   ;; (cpp-sema-types, the checker: [class.dtor]/7, the implicit destructor is deleted when a potentially
+                   ;; constructed subobject's destructor is deleted, or, for a virtual destructor, when the non-array
+                   ;; deallocation function its lookup finds in the class's scope is inaccessible from it (a base's private
+                   ;; operator delete); a deleted function overrides no function that is not deleted, [class.virtual]/18
+                   ;; (C++23 /20): GCC's "deleted function 'virtual D::~D()' overriding non-deleted function", at the class;
+                   ;; cpp0x/implicit1.C. The second marks the destructor deleted, its uses' errors then, `D d;`)
+                   (when (and virt (checking?) *on-refusal* (:cx-node c) (not (:header c)) (not (:union c))
+                              (not (:deleted (fnd (:dtor (abi/cls (:cls virt)))))))
+                     (let [sub (some (fn [sc] (let [g (some-> (abi/cls sc) :dtor fnd)] (when (and g (:deleted g) (:deleted-sure g)) sc)))
+                                     (or (cx-sub-classes id) []))
+                           dl (when-not sub
+                                (let [es (class-lookup id "operator delete")
+                                      fs (keep (fn [[_ e]] (when (= :fn (:e e)) (fnd (:id e)))) es)]
+                                  (when (and (seq fs) (every? #(and (:cls %) (not= id (:cls %)) (= :private (:access %))
+                                                                    (false? (cx-access-ok? {:records #{id}} (:cls %) :private (:cls %) nil)))
+                                                              fs))
+                                    (first fs))))]
+                       (when (or sub dl)
+                         (when dl (upd-fn! fid assoc :deleted true :deleted-sure true))
+                         (*on-refusal* (ex-info (str "codegen: deleted function '~" (:name c) "' overriding non-deleted function")
+                                                {:codegen/refused :virtual :cx/node (:cx-node c)})
+                                       (:cx-node c))))))
         (:defaulted (fnd d)) (upd-fn! d assoc :trivial (not (or nontriv (:virtual (fnd d)))))
         :else nil))
     ;; the default constructor
@@ -12017,7 +12039,8 @@
   default member initializer); true when the slice cannot tell (an anonymous member, a template, a header's class)."
   [id]
   (let [c (abi/cls id)]
-    (or (nil? c) (not (:complete c)) (:tmpl c) (:header c)
+    ;; (cpp-sema-types: a class template's specialization of concrete arguments, its members known, is judged as a class)
+    (or (nil? c) (not (:complete c)) (and (:tmpl c) (or (empty? (:targs c)) (dt-dependent? (:targs c)))) (:header c)
         (some #(let [f (fnd %)] (and (empty? (:ps (:ty f))) (not (:implicit f)) (or (not (:defaulted f)) (:ool-defaulted f)))) (:ctors c))
         (seq (:ctor-tmpls c)) (seq (:inherits-ctors c))
         (if (:union c)
@@ -14464,6 +14487,20 @@
                     ;; (queue 500: a specialization surely without a definition, the variable's refusal)
                     :else (throw (or (cx-sure-incomplete-refusal n nil x) x))))))
         _ (incomplete-var! n ty)
+        ;; (cpp-sema-types, the checker: [dcl.init.general]/7-8, a const object default-initialized -- no initializer, not extern
+        ;; -- is of a const-default-constructible class type (cx-const-default-constructible?, its elements' for an array), else
+        ;; ill-formed, a scalar's always: GCC's "uninitialized 'const t'", at the variable; here a function template's
+        ;; specialization's or a class template specialization's, which diag.ae's uninit-consts does not judge by name;
+        ;; init/pr42844.C's `T const t;` of g<H>, `F<int> const f;`)
+        _ (when (and (checking?) *on-refusal* (nil? (init-kid n)) (not= "extern" (:storageClass n)) (map? ty) (not (abi/ref? ty)) (not (:cx-catch n))
+                     (not (header-node? n)) (not (:_ctad n)) (nil? cv)
+                     (let [et (loop [t ty] (if (abi/arr? (abi/unq t)) (recur (:of (abi/unq t))) t))
+                           u (abi/unq et)]
+                       (and (or (:c ty) (:c et))
+                            (or (some-> (:fn-id ctx) fnd :tinst) (and (abi/class? u) (seq (:targs (abi/cls (:id u))))))
+                            (or (and (abi/scalar? u) (not (:vla (abi/unq ty))))
+                                (and (abi/class? u) (not (cx-const-default-constructible? (:id u))))))))
+            (*on-refusal* (ex-info (str "codegen: uninitialized 'const " (:name n) "'") {:codegen/refused :uninit :cx/node n}) n))
         ;; (queue 570, the checker: a constexpr variable of a variably modified type, [dcl.constexpr]/6 with [expr.const]: its
         ;; object's size is a run-time value, GCC's "'constexpr' variable 'x' has variably-modified type 'const int [i]'";
         ;; gomp/pr85134.C)
@@ -15393,7 +15430,7 @@
                                        (if vd
                                          (let [;; (queue 487, the checker: a handler's type refused at the handler, GCC's
                                                ;; place for it, not the try statement's: parse/error54.C)
-                                               id (try (binding [*cx-vla* (when (checking?) (:scope c))] (local-var! c vd :local))
+                                               id (try (binding [*cx-vla* (when (checking?) (:scope c))] (local-var! c (cond-> vd (checking?) (assoc :cx-catch true)) :local))
                                                        (catch arbace.lang.ExceptionInfo x
                                                          (throw (if (and (checking?) (= :ambiguous (:codegen/refused (ex-data x))) (not (:cx/node (ex-data x))))
                                                                   (ex-info (.getMessage x) (assoc (ex-data x) :cx/node h))
