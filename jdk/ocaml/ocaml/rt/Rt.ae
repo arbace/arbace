@@ -162,12 +162,21 @@
                         (> depth (unchecked-subtract-int DEPTH_LIMIT 256))
                         (Rt/hopDue))
                   129 0)))
-  ;; the result of a letrec group function's body (TailCall, OC84 (c)): the tail calls it returns made in turn, in this frame
+  ;; the result of a letrec group function's body (TailCall, OC84 (c)): the tail calls it returns made in turn, in this frame;
+  ;; (queue 604) and a Tail's (a tail call returned at the light level), each made as from a tail call (tok), so that its own deep
+  ;; tail call returns here in turn
   (method ^:public ^:static bounce [r]
     (loop [x r]
-      (if (instance? TailCall x)
-        (let [t (cast TailCall x)] (recur (.tb (.-c t) (.-args t))))
-        x)))
+      (cond (instance? TailCall x) (let [t (cast TailCall x)] (recur (.tb (.-c t) (.-args t))))
+            (instance? Tail x) (let [t (cast Tail x)] (set! tok true) (recur (Rt/ap (.-f t) (.-args t))))
+            :else x)))
+  ;; (queue 604) the light level's tail calls (o2j's tail-form): tok is true from a tail call's site to its callee's entry, which takes
+  ;; it (o2j's entered: ok$) and clears it, so a function entered from no tail call (a non-tail site, the runtime's calls, a hop)
+  ;; sees false; a function entered from a tail call may return its own tail call as a Tail once its thread's frames are deeper than
+  ;; TAIL_DEPTH, else it calls it in place; one entered from no tail call makes its tail calls' Tails (bounce). The runtime's own
+  ;; closures (Native, OiFn) clear it at their entry
+  (field ^:public ^:static ^boolean tok false)
+  (field ^:public ^:static ^:final ^int TAIL_DEPTH 256)
 
   ;; the values registered by name (caml_register_named_value)
   (field ^:public ^:static ^:final ^HashMap named (HashMap.))
@@ -526,9 +535,12 @@
           (and (instance? Block f) (== (.-tag (cast Block f)) 247)) (Rt/fn (aget (.-f (cast Block f)) 0))
           :else (throw (Rt/internal (java-str "apply of a value that is not a function: " (Rt/describe f))))))
   ;; f applied to args: exact, partial or over-application
+  ;; (queue 604) an exact application keeps its caller's tok (a Tail made by bounce); a partial or over-application none
   (method ^:public ^:static ap [f ^Object/1 args]
-    (let [c (if (instance? Closure f) (cast Closure f) (Rt/fn f)) n (alength args) ar (.-arity c)]
-      (cond (== n ar) (.exact c args)
+    (let [ok tok
+          c (if (instance? Closure f) (cast Closure f) (Rt/fn f)) n (alength args) ar (.-arity c)]
+      (set! tok false)
+      (cond (== n ar) (do (set! tok ok) (.exact c args))
             (< n ar) (Pap. c args)
             :else (Rt/ap (.exact c (Arrays/copyOfRange args 0 ar)) (Arrays/copyOfRange args ar n)))))
   (method ^:public ^:static ap1 [f a] (Rt/ap f (new Object/1 [a])))

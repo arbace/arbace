@@ -27231,6 +27231,35 @@ level (t4-print-1125's regression check); judged after mac/next's merge (`47ae83
   3,225 / 1 / 49 (50 n/a) -> 3,238 / 0 / 37 (50 n/a); print 3,324 / 0 / 1 -> 3,291 / 0 / 34. crops-score --record and --judge
   --strict 0 problems (Java completeness 99.2%), records-check 0, markers-check 0.
 
+## 2026-11-26 — OCaml AOT: tail calls at the light level (queue 604, VM)
+
+The user's DECISION 603-1 (c) (2026-11-26): build tail calls at the light level so that parallel/mctest passes under the default
+DEPTH_LIMIT, the depth gone at its cause. Branch `604-ocaml-light-tail-calls` from `89b381f6c` (doc/ocaml/OCAML-SURVEY.md, "As built:
+queue 604").
+- The protocol: `Rt/tok` set at a tail call's site just before its callee's entry, which takes it (`ok$`) and clears it; a function
+  entered from a tail call returns its own tail call as a `Tail` once its thread is deeper than `Rt/TAIL_DEPTH` (256), else makes it in
+  place; a function entered from no tail call bounces the Tails its tail call returns (`Rt/bounce`, which now runs Tails beside the
+  letrec groups' TailCalls). Effects' runstack, resume and reperform in a function's tail dispatch the handler's function as from a tail
+  call (`runstackT`, `resumeT`, `reperformT`), so mctest's handlers continue the next fiber through `continue`'s Tail. The runtime's own
+  calls are never tail calls (`Rt/ap` passes tok only to an exact application; Native and OiFn clear it). The compiled level is
+  unchanged (*in-ns*: Go's stack).
+- Alternatives considered: a Tail for every tail call (an allocation and a bounce for each, the light level's hot path; the depth test
+  keeps shallow calls direct); a per-call-site bounce check on every non-tail call (a check or a frame at every call); a second entry
+  method per closure for tail calls (every body twice); unwinding by an exception to a trampoline (the non-tail frames in between
+  would lose their continuation).
+- The n/a class `:na-native-code` (the user's 2026-11-24 decision for discard_in_callback): its other rows still fail (asmcomp/optargs
+  in the suite; backtrace/lazy and struct_include_optimisation in the main corpus) or are classed by header, so the class stays and
+  discard_in_callback, passing since queue 603, leaves the suite class's :programs and :reasons. No decision needed.
+- Records (2026-11-27, after the VM's suspend of 23:01-07:28): the whole light run, `bin/oi check --aot --record` (544 programs, 432 pass at
+  its end) and `bin/oi suite check --aot --record` (132, 115 pass), then `--only-list --record` reruns of statmemprof/intern (its known
+  entry without the pin: it now finishes, on line 176), typing-labels/mixin2 and opam/fmt/test_fmt. Passing now beside mctest:
+  parallel/test_issue_11094 (its known entry gone), lib-filename/quotecommand, lib-hashtbl/htbl, lib-marshal/intern_final, misc/taku,
+  parallel/major_gc_wait_backup, lib-dynarray/test, lib-floatarray/floatarray (their aot-slow.edn entries gone). weak-ephe-final/
+  weaklifetime has a known entry: it passed in batches only because Gc.quick_stat's counter is the process's; alone it fails with 603's
+  translator too. Two rows fail outside o2j and in no class, so `bin/reap --record` refuses to write the matrix (OCaml AOT would be
+  568 / 11 / 29): typing-labels/mixin2's typing (arbace.repr.ocaml.typer's unify, oi's own row the same "typer: Unify"), and
+  opam/fmt/test_fmt's C stubs (repr/c's reader on b0's vendored xxhash.h, line 3938), both reproducible here and untouched by this
+  branch (the typer's and repr/c's commits of 2026-11-25 on next are the candidates); left to the host, crops-score with them.
 ## 2026-11-27 — C++ read independence: the own front end's fifth pass over the clang-only dg rows (cpp-read-indep-1127)
 
 Branch `cpp-read-indep-1127` (host agent, off next 120b1b912; 20 commits `5cacd0245`..`871ae470a`), merged into next by fast-forward.
@@ -27255,3 +27284,89 @@ Asked: what keeps C++'s read stage at 0.926 of independence (bin/crops-score), t
   checker's function types (cpp1z/noexcept-type3.C), C++20 parenthesized array new (cpp2a/paren-init36.C, 37). At this pass's rate
   (about 59 rows a pass) read reaches 1.0 after about 14 more passes; put to the user.
 Alternatives: a ruling on counting these rows was not assumed; the stage stays measured as it is until the user decides.
+
+## 2026-11-27: train 9 recorded (Python's fix branches on one executable): eval 43,838 / 0 / 39 -> 43,876 / 0 / 6
+
+Branch `train-9` (mac) from mac/next `120b1b912` (train 7 and train 8 merged), train 7's method (.tmp/t9/ holds its scripts:
+train-9.sh, records-9.sh, wd-run.sh, judge.sh, tools/hold9.py). Members, merged one by one:
+- py-regress-1127 `678975e2a` (`45d37d16c` get_recursion_depth and pymem_getallocatorsname, `f6844d893` a garbage weak
+  reference cleared without its callback in gc.collect(), bpo-38006, `678975e2a` each Python thread its own C stack, the C
+  world's entry state swapped at the GIL's hand-off);
+- py-mp-1127 `796c623f8` (`b9c1d3ea3` the forkserver child's preload, `4addbd6c6` finalize's finHeld);
+- py-timeouts-1127 `63f8cc0fb`, the Mac's queue 605 (`05b39a17a` the interpreter's pending calls, TestPendingCalls' hang;
+  `262ab0d44` test_pickle's framed_write 900 s; `63f8cc0fb` test_httpservers' test_get skip-listed with the :finalization
+  reason, the user's 605-1 (b));
+- py-footprint-1127 `a84296be9`, the Mac's queue 606 (bin/pyi check's children by the compiled launcher by default, the user's
+  606-1 (a); crt's Rodata off Go's heap; aotIdleFree; the children's GOGC 100);
+- py-small-1127 `b59ded8d6` (`6dee5126d` the eval cell's small deferred classes, `b59ded8d6` a nested code's codeTop);
+- py-cworld-cycles-1127 `9e03ed6f7`, the Mac's queue 609 (`65010db23` the collector's hooks for the C world's nodes,
+  `9e03ed6f7` pyctypes/cycles: C-born objects and ctypes classes traversed and cleared);
+- 607's limits commit alone, cherry-picked (`f952604c5` -> `1939a8916`: test_datetime's test_easy at 900 s); 607's
+  `f64d5bdc9` not taken (a second implementation of `678975e2a`'s per-thread C stacks);
+- 604-ocaml-light-tail-calls-final `45fb9d2ab` (OCaml's tail calls at the light level, its records): its test/ocaml conflicts
+  merged (aot-cpu-caps.tsv both sides' caps; aot-known.edn and :light-depth 604's: mctest and test_issue_11094 pass at the
+  light level); two of its rows held at next's (typing-labels/mixin2, pass on next, and opam/fmt/test_fmt, slow on next: its
+  run gave both "dump", the typer's Unify and repr/c's read of b0's xxhash.h, outside o2j and in no class, which made bin/reap
+  refuse the matrix); check-suite-aot-native.edn's header the suite record's again (604's write gave it the run corpus's);
+- 608-ocaml-ppx-made `3c4a541cc` (bin/lib/oi/suite.bash's export lists, out of every key).
+go/arbace/py at the Go level, as trains 5-7: the merge commits keep the files two members changed at the first parent; those
+files printed by repr/go at the members' common base (the same go/ at f3da80d1c, 7bf7cc85e, f0e9bc5cd and 120b1b912) and at each
+head, 3-way merged by git merge-file with no conflict (finalize.go: py-regress, py-mp, py-small, then 609;
+builtins_testinternalcapi.go: py-regress, py-timeouts, py-small; thread_gil.go: py-regress, py-timeouts; aot.go: py-footprint,
+py-small), gofmt, go vet and go test clean, read back by bin/pyi runtime read on stage 0 twice (`ce294acb4`, then `9fde8e49a`
+with 609): only those files and the indices py.ae and pyctypes.ae changed, pytls untouched (py-small's warning). Pre-build:
+markers ok, records-check 0, bin/javac-vendor names 0 clashes, bin/pyi divergences rc 0. Built once under the big lock
+(HEAVY_MEM_GIB 30; j2g's edge unchanged): KEY20 `e89947b7637c5ceb2de8` at `1939a8916`, 2 h 41 min, 30.7 GB peak, smoke ok.
+
+On the build, before the records: py-regress's .tmp/tmp/thr.py (4 threads pickling through the C _pickle; train 7's build
+segfaulted 3 of 3) passed 3 of 3, 0 errors, though about 349 s a run against thr1.py's (1 thread) 13.3 s; thr1.py passed.
+
+Records (the train's own executable, PYI_RUNTIME_REQUIRE=compiled, wd-run.sh's watchdog with SIGINT and SIGQUIT at their
+defaults, tickets queued from a shell holding no lock; bin/pyi runner compiled once first, 17.7 min):
+- A (16 GiB, 2 at once): train 7's 115 modules, test_httpservers (605-1 (b)'s row), test_weakset and test_tempfile (they hold
+  deferred rows and were in no list of train 7's): 118 modules, 1 h 49 min; B1 (the same ticket, 1 at once): the 8
+  concurrent.futures and multiprocessing modules that are not process modules, 14 min; 0 hung.
+- Pool(200), the user's 606-2: `e8cec6ecd` removed libtest_run.py's large_pool_adjust; spawn's test_misc then ran first in
+  P's 40 GiB ticket (HEAVY_LOCK_CAP_PCT 100) and the cgroup went from 1.5 GB to 28.5 GB in 5 s and past its 40 GiB within
+  45 s of the module's start, before any test reported: the 200 workers' starts overlap before the idle releaser's first look
+  (606 measured 107-136 MB a worker 1 s after start, 75-81 MB settled). As 606-2 says when Pool(200) does not pass, the
+  variant came back (`f8d3f8644` reverts `e8cec6ecd`); forkserver's Pool(200) (its workers started one after another) was
+  not run, spawn's failure deciding the revert.
+- P (40 GiB, 1 at once, .tmp/t9/limits-9p.tsv: train 7's raised limits, the three test_misc 38912 MB): spawn's, forkserver's
+  and fork's test_processes, forkserver's test_threads, test_process_pool and the three test_misc at Pool(20): 21 min, 4.0 GB
+  peak, 0 hung.
+Judged together (134 modules: 24,719 pass, 8,371 classed, 10 regressions, 41 now pass) and recorded whole by --record, with
+per-row holds (the old row kept, .tmp/t9/tools/hold9.py: in place, or put back after its predecessor where the writer left
+the row out); test_crossinterp's rows kept as recorded (as train 7: the run's subtest ids hold addresses and the worktree's
+path). 43 rows now pass (21 failures, 8 timeouts, 5 errors, 3 crashes, 1 not-run): 605's three TestPendingCalls rows and
+test_max_pending, the pickle framed_write row, 609's test_pointer_types_factory and test_cyclic_gc, py-small's rows
+(getsizeof, the audit event, METH_DESCRIPTOR, the str-subclass kwargs, TIER2_THRESHOLD, csqrt, CodeWeakRefTest,
+raise_and_yield_from), py-mp's preload_resources and ressources_gced_in_workers, py-regress's test_free_reference and
+test_shutdown_race_issue12456 (train 7's crashes), 607's test_gh105829 and test_saturation and test_repr_rlock, test_easy.
+Held (reported to the coordinator, owed to a later train):
+- test_compile's test_particularly_evil_undecodable and test_yet_more_evil_still_undecodable: a script with null bytes run by
+  the compiled launcher (606-1's children) says "source code string cannot contain null bytes" (exec's message), where
+  tools/pyi/python3 says the test's "source code cannot contain null bytes" (reproduced by hand);
+- test_sys's test_ioencoding_nonascii: skipped, "requires FS encoding to match locale" in the driver (the record passed it);
+- test_weakref's MappingTestCase.test_weak_keyed_union_operators (a value found after its key's death);
+- test_shutdown's ThreadPoolShutdownTest.test_del_shutdown (idle past 90 s); test_datetime's ZoneInfoTest_Fast.test_gaps
+  (past 300 s);
+- fork's test_misc TestResourceTracker.test_resource_tracker_sigkill and _sigterm ([Errno 3] No such process);
+- spawn's WithProcessesTestPool.test_async_timeout and forkserver's WithProcessesTestProcess.test_interrupt (idle past 90 s, as
+  at train 7: not served by `678975e2a`).
+test_max_pending's "[not main-only]" subtest row is gone (its parent now runs), test_httpservers' test_get reads the skip
+list's :finalization reason, test_gc's test_heap_size errors where it skipped (classed).
+The classes: 30 passing names dropped (605's three TestPendingCalls rows out of :testinternalcapi's :tests; 609's two out of
+:finalization-collect's); emptied and dropped :pickle-c-gaps, :code-objects, :finalization-collect, :sys-module,
+:testcapi-behaviour, :tools-misc, :audit-hooks, :core-objects-287 and :regrtest-children (no :match); the user's decision of
+2026-11-27: test_weakset's test_weak_destroy_while_iterating (from :core-objects-287) and test_regrtest's
+ArgsTestCase.test_unraisable_exc (from :regrtest-children) to :finalization (n/a, reference counting's moment, as 537-2 (a)).
+mac/next `2e2cd3ef1` merged after the records (C++ read's commits). bin/pyi divergences rc 0; bin/reap --record (56 of 56
+cells, 0 problems; OCaml AOT 563 / 11 / 36 -> 570 / 11 / 29 with 604); bin/crops-score --record (Python's completeness
+0.9998 -> 1.0000 as rounded, 6 rows deferred; OCaml 0.9807 -> 0.9836) and --judge --strict 0 problems; records-check 0,
+markers ok. No bin/gate (the user: none until Python is 100%).
+Left deferred (6): :buffer-exports 2 (test_memoryio's PyBytesIOTest.test_getbuffer_empty and
+test_writelines_concurrent_export, BufferError not raised), :multiprocessing-children 2 (spawn's and forkserver's
+WithProcessesTestPollEintr.test_poll_eintr, "False is not true"), :finalization-goi 1 (test_sqlite3's
+test_table_lock_cursor_non_readonly_select, "database table is locked"), :os-and-files-misc 1 (test_tempfile's
+TestMktemp.test_basic, "Directory not empty").
