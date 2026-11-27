@@ -1286,8 +1286,16 @@
                     (fail :template "a pointer argument " text)))
           :declconst {:decl (:decl e) :ty pt :mangled (:mangled e) :ref (boolean (abi/ref? pt))}
           :fn (let [want (if (abi/ptr? pt) (:to pt) (:to pt))
+                    same (fn [g] (and (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps want))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret want)))))
+                    ;; (cpp-sema-ovl, the checker: [temp.arg.nontype]/1's converted constant expression with [conv.fctptr]: a
+                    ;; noexcept parameter type takes a noexcept function alone, cpp1z/noexcept-type9.C's C<&A::g>)
+                    _ (when (and (sema/checking?) (abi/fn? want) (:nx want)
+                                 (some #(and (= :fn (:e %)) (same (sema/fnd (:id %)))) es)
+                                 (not-any? #(and (= :fn (:e %)) (same (sema/fnd (:id %))) (:nx (:ty (sema/fnd (:id %))))) es))
+                        (throw (ex-info "codegen: could not convert an expression of type pointer to function to a pointer to noexcept function in a converted constant expression"
+                                        {:codegen/refused :conversion :cx/sure-drop true})))
                     fid (or (some #(let [g (sema/fnd (:id %))]
-                                     (when (and (= :fn (:e %)) (= (mapv abi/unq (:ps (:ty g))) (mapv abi/unq (:ps want))) (= (abi/unq (:ret (:ty g))) (abi/unq (:ret want))))
+                                     (when (and (= :fn (:e %)) (same g) (or (not (and (sema/checking?) (:nx want))) (:nx (:ty g))))
                                        (:id %)))
                                   es)
                             (fail :template "no function " nm " of the parameter's type"))]
@@ -1927,10 +1935,13 @@
           (not qual-ok) false
           (not (dependent? P)) (or (boolean (tdf :skip-non-dependent))
                                    (if (tdf :ignore-qualifiers) (= (unq-array P) (unq-array A)) (= P A))
+                                   ;; (cpp-sema-ovl, the checker: a noexcept function type A for P of the type without noexcept,
+                                   ;; [temp.deduct.call]/4's function pointer conversion of the argument; C++17's :nx)
+                                   (and (sema/checking?) (abi/fn? P) (abi/fn? A) (:nx A) (not (:nx P)) (= P (dissoc A :nx)))
                                    ;; (CX12, the checker: two function types that differ in a member function's qualifiers
                                    ;; alone, a sure mismatch)
                                    (and (sema/checking?) (abi/fn? P) (abi/fn? A)
-                                        (= (dissoc P :cq :vq :refq) (dissoc A :cq :vq :refq)) (sure!)))
+                                        (= (dissoc P :cq :vq :refq :nx) (dissoc A :cq :vq :refq :nx)) (sure!)))
           :else
           (let [down (if (= pok :call) :none pok)]
             (case (:k P)
@@ -1963,6 +1974,8 @@
               :fn (and (abi/fn? A) (= (boolean (:va P)) (boolean (:va A)))
                        ;; (CX12, the checker: a member function's qualifiers match exactly, FunctionProto's getMethodQuals)
                        (or (not (sema/checking?)) (and (= (boolean (:cq P)) (boolean (:cq A))) (= (boolean (:vq P)) (boolean (:vq A)))) (sure!))
+                       ;; (cpp-sema-ovl, the checker: a noexcept P takes no A without noexcept, no conversion adding it, [conv.fctptr])
+                       (or (not (sema/checking?)) (not (:nx P)) (:nx A) (sure!))
                        (deduce-by-type-match b tid (:ret P) (:ret A) #{} down)
                        (if (= :pack-exp (:k (peek (vec (:ps P)))))
                          (match-args b tid (:ps P) (:ps A)) ; R(Args...): the trailing pack takes the rest
