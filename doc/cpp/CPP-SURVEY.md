@@ -12616,3 +12616,35 @@ each rule from the standard's text, its valid forms probed beside the invalid on
   whole had lost concepts-template-parm6.C); no type named in a complete class a sure
   substitution failure (cpp2a/concepts-pr65854.C); a compound requirement surely false by its type-constraint whatever its
   noexcept, which the checker leaves unjudged (concepts/diagnostic7.C).
+
+Checks (the worktree's .tmp/own/, .tmp/bin/jr NAME LIST a dg-error run of `--front native --only LIST` with .tmp/bin/cmp
+against the record): regressions over the 3,332 recorded own passes and the area's 359 candidates (3,691 files, every one of
+the fifth pass's tooling's names in .tmp/an/reg1.list). r1 at `bf64cc2cc` lost four to flowing off the end (a body whose
+refused statement the checker had left out, or whose error was reported elsewhere -- cpp2a/consteval3.C, consteval34.C,
+cpp1z/launder2.C, cpp1y/pr63996.C's VLA; fixed, `c837280b4`) and cpp2a/concepts-pr67774.C to its timeout; r2 at `c837280b4`
+lost ext/flexary9.C and template/builtin-atomic-overloads6.C to the zero-size array rule (an error under -pedantic-errors alone,
+-Wno-pedantic honoured: `70ced3e61`) and two to the cap (cpp1z/constexpr-asm-3.C, 147 s alone; concepts-pr67774.C);
+r3 at `70ced3e61` gained 52 and lost concepts-pr67774.C's timeout alone (268.5 s run alone under the host's load of 18; 99.7 s
+with this branch and 100.2 s at the base `2e2cd3ef1` side by side in one process each: the load's, not the rules'), while
+cpp2a/concepts-template-parm6.C, r2's gain, failed: a variadic concept constraining a pack had been taken as C<Ts...> whole, the
+standard's (C<T> && ...) since (`c21f00084`); r4 at `c21f00084`, the branch's last rule: 53 rows to own pass, 0 recorded passes
+lost but two timeouts under the load (lookup/missing-std-include-3.C, 73 s run alone, a pass; concepts-pr67774.C, 266 s run alone at `c21f00084`, a pass, near the 300 s cap: record it from a run alone, as the fifth pass did), the
+dg negative control (dr2082-vs-dr1423) failing as it must. The 53 are test/cpp/sema-pass-const.txt (one CORPUS/FILE a line), every
+one a counted row clang passes; the record (test/cpp/check-dg-own-linux-amd64.edn) and test/crops/scores.edn are left to the
+three branches' merge, recorded once.
+
+Left in the area: of the 359 rows the area's words and directories select among the 766 (a wide net: others' rows among them),
+306 still fail. The kinds: the evaluator's own gaps (a `this` pointer into the object being initialized,
+cpp1y/constexpr-nsdmi6a.C; weak symbols' addresses, constexpr-array-ptr10.C; __builtin_launder, diagnostic/constexpr3.C; GNU
+array designators, cpp0x/desig4.C; a reference to a temporary returned, constexpr-48324.C); templates' definitions checked before
+instantiation (a non-dependent noexcept operand, cpp0x/pr88987.C, cpp1y/noexcept1.C; the checker analyzes a function template's
+body and signature at its instantiations alone); a member template's packs of an enclosing template's instance
+(cpp0x/variadic10.C, variadic-ex13.C, the mismatch never reached); non-trailing packs' non-deduced contexts
+(cpp0x/variadic-nondeduce1.C); deduced return types used before their definition (cpp2a/concepts-requires23.C); variable template
+instances' placeholders not deduced (cpp2a/concepts-var-templ2.C); class template argument deduction's aggregate and explicit
+guides (cpp2a/class-deduction-aggr*.C, explicit18.C, cpp1z/class-deduction-new1.C); requirements on const objects' assignment
+(concepts/diagnostic15.C, a requirement's `*o = 1` of a const int* analyzes). Rows of the other areas met here:
+cpp0x/noexcept90.C, cpp1y/static_assert3.C (noexcept's value, the checker's types without :nx: overload and noexcept's);
+cpp0x/static_assert9.C, cpp1z/constexpr-if11.C (a non-static member or destructor named without an object: class rules);
+cpp0x/constexpr-array12.C (a variable named in its own initializer reported undeclared, [basic.scope.pdecl]/1);
+template/crash131.C (a declaration whose type refused, its later use's cascade reported).
