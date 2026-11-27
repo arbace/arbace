@@ -4496,6 +4496,31 @@
               (and ov (nil? g)) (report (str "'" (:name f) "' marked 'override', but does not override"))
               (and fi (nil? g) (not (:virtual f))) (report (str "'" (:name f) "' marked 'final', but is not virtual"))
               :else nil)))
+    ;; (cpp-sema-types, the checker: [dcl.fct.default]/9, a non-static data member appears in a member function's default argument
+    ;; only as a class member access's id-expression or forming a pointer to member (or in an unevaluated operand): an
+    ;; unqualified name of one, `&a`, `a + 1`, is GCC's "invalid use of non-static data member 'B::a'", at the name, judged when
+    ;; the class is complete; template/error15.C's `void f(const A<T> * a1 = &a);` of B<long>)
+    (when (and (checking?) *on-refusal* (:scope c))
+      (doseq [mid (:methods c)
+              :let [f (fnd mid) nd (:node f)]
+              :when (and (map? nd) (not (:implicit f)) (not (header-node? nd)) (#{:method :ctor} (:kind f)))
+              p (param-nodes nd)
+              :let [d (first (remove #(str/ends-with? (str (:kind %)) "Attr") (kids p)))]
+              :when (map? d)]
+        ((fn walk [x]
+           (when (map? x)
+             (cond
+               (and (= "UnaryExprOrTypeTraitExpr" (:kind x))) nil
+               (#{"CXXNoexceptExpr" "DecltypeType" "CXXTypeidExpr" "LambdaExpr"} (:kind x)) nil
+               (and (= "DeclRefExpr" (:kind x)) (empty? (:qualifier x)) (string? (get-in x [:referencedDecl :name])))
+               (let [nm (get-in x [:referencedDecl :name])
+                     e (first (try (lookup (:scope c) nm) (catch arbace.lang.ExceptionInfo _ nil)))]
+                 (when (and (#{:field :indirect} (:e e)) (get-in x [:range :begin :offset]))
+                   (*on-refusal* (ex-info (str "codegen: invalid use of non-static data member in a default argument ('" nm "')")
+                                          {:codegen/refused :default-arg :cx/node x})
+                                 x)))
+               :else (doseq [k (:inner x)] (walk k)))))
+         d)))
     ;; the destructor
     (let [members (class-like-members id)
           d (:dtor (abi/cls id))
