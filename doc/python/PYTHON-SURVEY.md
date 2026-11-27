@@ -9610,3 +9610,51 @@ executable (KEY20 `e89947b7637c5ceb2de8`) its thr.py (4 threads, C `_pickle` ove
   py-regress-1127's scratch): thr.py prints `errors [] 0` in 3 of 3 runs, in well under its 349 s (the serialized cost: about 4
   times thr1.py's work, so under 60 s); thr1.py prints `errors [] 0` and is not slower than its 13.3 s; `thrn.py 1 40 0.005 0`
   is not slower than 13.2 s, and `thrn.py 4 10 0.005 0` is near it, not 23.4 s.
+
+## As built: py-regress2-1127, train 9's held rows at their causes (2026-11-27, the main host)
+
+Train 9's records (mac/train-9, built at 1939a8916, executables `.tmp/gate-exe/e89947b7637c5ceb2de8`) held ten rows at
+their old passes. Each probed alone or in its module's order on train 9's executable (`bin/pyi check --only`; the
+driver `test/python/libtest_run.py` started as the runner starts it, by pyi on the tools' host or by the compiled
+launcher; a train-9 worktree for the measurements), the Go fixes verified natively on the worktree's compiled launcher
+(bin/pyi's AOT module rebuilt from the checkout's runtime: the launcher runs the changed runtime compiled).
+
+- **test_compile's test_particularly_evil_undecodable and test_yet_more_evil_still_undecodable** (`2422b377a`): since
+  py-footprint-1127's 80cee17b6 a driver's children are compiled launcher programs, whose RunModule asks the host's compiler
+  for a non-UTF-8 script's error (mainSourceError, mode "source-error"); astjson's compile-answer read the bytes as a
+  string's (compile()'s "source code string cannot contain null bytes"). Every "source-error" request is a file's bytes
+  (the main module, PYTHONSTARTUP; compile()'s source_as_string refuses a null byte before it asks), so it now reads as the
+  file tokenizer (lex/*file-input*, as run-dump binds it): the two tests' files give CPython 3.14.10's three lines exactly
+  on the launcher.
+- **test_sys's test_ioencoding_nonascii** (no change): it skips, "requires FS encoding to match locale", where the record
+  has a pass, and CPython's own reference (`ref-cpython314-lib-test-all.edn`) has the same skip. pyi answers as CPython 3.14.10
+  in every environment tried (no LANG, LANG=C.UTF-8, LANG=C, LC_ALL=C, LC_CTYPE=POSIX; the launcher and pyi on the host):
+  utf-8 and UTF-8 outside UTF-8 mode, utf-8 twice in it (C and POSIX turn it on). The decorator runs in the driver, which
+  the runner starts with its own environment (libtest_all.py's `dict(os.environ)`, not env()'s LC_ALL=C.UTF-8 the oracle
+  gets), so the row follows the locale of the shell that launches the records: a pass needs a C or POSIX locale there.
+  The record's pass (2026-11-19, kept through 2026-11-25) is that or an older pyi's answer; no member of train 9 changed
+  _locale (getencoding: "ASCII" in the C locale, else "UTF-8", unchanged since queue 200) or the UTF-8 mode's rule. The
+  row is the record's: CPython's skip under the runner's environment.
+- **test_weakref's MappingTestCase.test_weak_keyed_union_operators and test_concurrent_futures.test_shutdown's
+  ThreadPoolShutdownTest.test_del_shutdown** (`9758cb8e6`, finalize.go): py-mp-1127's finHeld (4addbd6c6). A `del` of a
+  list, tuple, dict or instance checked every tracked object it held with work or weak references due, each by a Go
+  collection (finVerify). check_len_race's `del items` (20 RefCycles keyed in a WeakKeyDictionary, 99 rounds: objects
+  CPython cannot free at that moment either) spent about 2,000 collections, past the moment's budget (finDeleted: 50 ms
+  and a tenth of the run), so the next test's `del o1` left its weak references to a later collection; in test_shutdown
+  the module's earlier dels did the same to `del executor`, whose weak reference's callback wakes the workers (the
+  faulthandler's dump: four workers in `work_queue.get`, the main thread in join). Reproduced on train 9's launcher: the
+  union test after check_len_race fails with 5 rounds and passes with 1 or with `items = None`; test_del_shutdown's body
+  after a 20-round `del items` hangs, and joins with `items = None`. Not f6844d893's cyWeakGarbage (gc.collect's probe)
+  nor 609's hooks. finHeld now looks for work due alone (finWorkDue: a `__del__` or a finalizer): py-mp-1127's case keeps
+  its moment (an instance's args tuple's, a tuple's and a list's `__del__` object run at their del, as CPython's; spawn's
+  test_ressources_gced_in_workers ok), and an object with weak references alone that a deleted holder held gets its
+  callbacks at the next collection, as before py-mp-1127. Natively: test_weakref's first 30 tests in order, the union
+  test ok; test_shutdown's 43 tests up to test_del_shutdown, ThreadPoolShutdownTest's four ok.
+- **fork's test_misc TestResourceTracker.test_resource_tracker_sigkill and test_resource_tracker_sigterm** (`7bd8941e0`,
+  bin/pyi's compiler.sh): "[Errno 3] No such process" at `os.kill(pid, signum)`. Since 606-1 the resource tracker is a
+  compiled launcher child, and the host compiler it starts for its run-time compiles (aot.go's exec.Command of
+  compiler.sh) got the tracker's pipe (main(N)'s descriptor, passed without close-on-exec), which Go's exec keeps. Killed
+  by SIGKILL, the tracker left its compile server holding the pipe's read end, so the parent's PROBE write succeeded, no
+  tracker was launched again and `_pid` named the dead one (/proc: the pipe's holders, the tracker and its
+  compile-server). compiler.sh now closes each descriptor above 2 without O_CLOEXEC (its fdinfo flags) before its exec.
+  On train 9's executable with this bin/pyi: the two rows pass (`bin/pyi check --only`, the host's driver).
