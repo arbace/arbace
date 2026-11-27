@@ -1438,6 +1438,16 @@
               (throw (ex-info (str "codegen: a type as the non-type template argument of " (:name p))
                               {:codegen/refused :template :cx/sure-drop true})))
           pt (param-type (or pscope scope) p)
+          ;; (cpp-sema-const, the checker: before C++20 a non-type template parameter has no floating-point type, [temp.param]/4
+          ;; of C++17: a placeholder parameter deduced from a floating literal is none, GCC's "'double' is not a valid type for a
+          ;; template non-type parameter"; cpp1z/nontype-auto3.C's B<2.5>)
+          _ (when (and (sema/checking?) (< (long sema/*cxx-year*) 20) (map? pt) (= :auto (:k pt))
+                       (or (float? f) (and (or (symbol? f) (and (seq? f) (= 'cpp/text (first f)) (string? (second f))))
+                                           (re-matches #"\s*(?:[0-9]*\.[0-9]+|[0-9]+\.)(?:[eE][-+]?[0-9]+)?[fFlL]?\s*|\s*[0-9]+[eE][-+]?[0-9]+[fFlL]?\s*"
+                                                       (if (seq? f) (second f) (str f))))))
+              (throw (ex-info (str "codegen: '" (let [x (str/trim (if (seq? f) (second f) (str f)))] (cond (re-find #"[fF]$" x) "float" (re-find #"[lL]$" x) "long double" :else "double"))
+                                   "' is not a valid type for a template non-type parameter (before C++20)")
+                              {:codegen/refused :template :cx/sure-drop true})))
           ;; (cpp-tpl2, the checker: a placeholder parameter's type deduced from a literal argument, [temp.arg.nontype]/1 with
           ;; [dcl.type.auto.deduct]: bool for true and false, int for an int literal; instantiate-fn checks its type-constraint)
           lit (cond (boolean? f) :bool ('#{true false} f) :bool (and (integer? f) (<= Integer/MIN_VALUE f Integer/MAX_VALUE)) :int
@@ -1445,6 +1455,15 @@
           pt (if (and (sema/checking?) (map? pt) (= :auto (:k pt)) lit)
                (if (= :bool lit) abi/bool* abi/int*)
                pt)
+          ;; (cpp-sema-const, the checker: and from a name of a value of known type -- another placeholder parameter's
+          ;; argument, an enumerator --, its type's, [dcl.type.auto.deduct]/2: concept C<V> in f<0>'s constraint,
+          ;; cpp2a/concepts-nonbool3.C, whose atom V then has type int)
+          pt (if-let [vt (and (sema/checking?) (map? pt) (= :auto (:k pt)) (symbol? f) (nil? (namespace f))
+                              (let [e (first (try (sema/lookup scope (str f)) (catch Exception _ nil)))
+                                    t (when (= :enumerator (:e e)) (:ty e))]
+                                (when (and (map? t) (:k t) (not= :auto (:k t)) (not (dependent? t)) (or (abi/integral? t) (abi/enum? t)))
+                                  (abi/unq t))))]
+               vt pt)
           ;; (cpp-def3, the checker: a function's name -- an overload set, no object -- for a non-type parameter of integral or
           ;; enumeration type, [temp.arg.nontype]/1's converted constant expression: no conversion makes one, GCC's "cannot
           ;; convert 'Dummy<int>::evil' from type 'void (Dummy<int>::)()' to type 'bool'": template/nontype13.C's bar<evil>)
@@ -1565,7 +1584,13 @@
   "The scopes over `scope` binding each pack of `packs` to its i-th element, for each i."
   [scope packs]
   (let [ns (distinct (map (fn [[_ e]] (count (or (:elems e) (:ids e)))) packs))]
-    (when (> (count ns) 1) (fail :pack "packs of different lengths in one expansion"))
+    ;; (cpp-sema-const, the checker: [temp.variadic]/7, the packs an expansion's pattern names have one number of elements,
+    ;; else ill-formed -- in a deduction a substitution failure: GCC's "mismatched argument pack lengths while expanding";
+    ;; cpp0x/variadic10.C's `tuple<pair<Outer, Inner>...>`)
+    (when (> (count ns) 1)
+      (if (sema/checking?)
+        (throw (ex-info "codegen: mismatched argument pack lengths while expanding a pattern" {:codegen/refused :pack :cx/sure-drop true}))
+        (fail :pack "packs of different lengths in one expansion")))
     (for [i (range (or (first ns) 0))]
       (let [s (new-scope :tparams scope :internal (:internal scope) :cls (:cls scope))]
         (doseq [[nm e] packs]
@@ -4973,6 +4998,27 @@
         (try (bind-scope scope (tparams n) nil -1) false
              (catch arbace.lang.ExceptionInfo e (sema/cx-recoverable? e))))))
 
+(defn- cx-not-structural
+  "cpp-sema-const (the checker): why the literal class `cid` is no structural type ([temp.param]/7.3 of C++20): a base or a
+  non-static data member that is not public, a mutable member, an rvalue reference member, or a base's or a member's class
+  (an array's element's) that is not structural in turn; nil when it is one."
+  [cid depth]
+  (when-let [c (and (< (long depth) 8) (abi/cls cid))]
+    (when-not (:lambda c)
+      (or (some (fn [b] (cond (not= :public (:access b)) (str "base class '" (:name (abi/cls (:cls b))) "' is not public")
+                              :else (cx-not-structural (:cls b) (inc (long depth)))))
+                (:bases c))
+          (some (fn [fl]
+                  (when (and (not (:static fl)) (string? (:name fl)) (seq (:name fl)) (not (:capture fl)))
+                    (let [t (:ty fl)]
+                      (cond (and (:access fl) (not= :public (:access fl))) (str "'" (:name c) "::" (:name fl) "' is not public")
+                            (:mutable fl) (str "'" (:name c) "::" (:name fl) "' is mutable")
+                            (and (map? t) (= :rref (:k t))) (str "'" (:name c) "::" (:name fl) "' has rvalue reference type")
+                            :else (let [u (loop [u (abi/unq t)] (if (and (map? u) (abi/arr? u)) (recur (abi/unq (:of u))) u))]
+                                    (when (and (map? u) (abi/class? u) (not (dependent? [u])))
+                                      (cx-not-structural (:id u) (inc (long depth)))))))))
+                (:fields c))))))
+
 (defn- cx-structural-params!
   "cpp-def2 (the checker): [temp.param]/6-7 (C++20), a non-type template parameter's type is structural: a class type that is no
   literal type (sema's cx-non-literal, sure) is not, GCC's \"'X' is not a valid type for a template non-type parameter because it
@@ -4986,7 +5032,7 @@
             :let [t (try (sema/resolve-type scope qt) (catch arbace.lang.ExceptionInfo _ nil))
                   u (when (map? t) (abi/unq t))]
             :when (and u (abi/class? u) (not (dependent? [u])))
-            :let [why (try (sema/cx-non-literal u) (catch arbace.lang.ExceptionInfo _ nil))]
+            :let [why (try (or (sema/cx-non-literal u) (cx-not-structural (:id u) 0)) (catch arbace.lang.ExceptionInfo _ nil))]
             :when why]
       (h (ex-info (str "codegen: '" (:name (abi/cls (:id u))) "' is not a valid type for a template non-type parameter because it is not structural")
                   {:codegen/refused :template :cx/node k})

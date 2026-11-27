@@ -2103,12 +2103,14 @@
   no doubt): the errors the checker reports as the program's at a statement (arbace.repr.cpp.diag's sema-rules: no member, an
   inaccessible or deleted function, no viable or an ambiguous call, no operator, an undeclared name, a call of a non-function,
   too few arguments, `*` of a non-pointer, a member of a non-class; queue 584: a unary operator's operand of a type it does not
-  take, [expr.unary.op]/7-10; a nested-name-specifier's type that is no class, [temp.deduct.general]/11.3), and a qualified name no complete class without bases declares (name-expr's); never over a type
+  take, [expr.unary.op]/7-10; a nested-name-specifier's type that is no class, [temp.deduct.general]/11.3; cpp-sema-const: a call
+  through a pointer to function of too many arguments, [expr.call]/7, an implicit conversion no standard conversion makes,
+  [conv]/1), and a qualified name no complete class without bases declares (name-expr's); never over a type
   the slice left dependent or undeduced."
   [e]
   (let [m (str (ex-message e))]
     (boolean (and (checking?)
-                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero|wrong type argument to unary|'[^']*' is not a class, struct, or union type)" m)
+                  (re-find #"^codegen: (\* of a non-pointer|member of a non-class|no member |'[^']*' is a (private|protected) member of|call to a deleted function|no viable function among [1-9]|ambiguous call|no match for 'operator|use of undeclared identifier|call of a non-function|missing argument|narrowing conversion from|unknown name \S+: no member of the complete class|template constraint failure for|cannot call member function '[^']*' without object|invalid use of non-static member function|ordered comparison of pointer with integer zero|wrong type argument to unary|'[^']*' is not a class, struct, or union type|too many arguments \(a call through a pointer to function\)|cannot convert \{.*\} to \{.*\} implicitly)" m)
                   (not (re-find #":k :(auto|dep|tparam)" m))))))
 
 (declare const-int analyze)
@@ -2141,7 +2143,12 @@
                    (or (abi/class? t) (and (= :call (:op x)) (or (abi/arith? t) (abi/ptr? t)))
                        ;; (cpp-tpl2: a name alone, a non-type template parameter or a variable, of an integral or pointer type
                        ;; other than bool: `requires N` of an int N, cpp2a/concepts-requires1.C's S1 and S4<int, 0>)
-                       (and (= "DeclRefExpr" k) (or (abi/integral? t) (abi/ptr? t)) (not (header-node? n)))))
+                       (and (= "DeclRefExpr" k) (or (abi/integral? t) (abi/ptr? t)) (not (header-node? n)))
+                       ;; (cpp-sema-const: a literal, a cast or an arithmetic operator's result of a type other than bool,
+                       ;; [temp.constr.atomic]/3's no conversion: `requires (T)5;`, `requires 5;`, concepts/pr94252.C)
+                       (and (or (#{"IntegerLiteral" "FloatingLiteral" "CharacterLiteral" "CStyleCastExpr" "CXXFunctionalCastExpr" "CXXStaticCastExpr"} k)
+                                (and (= "BinaryOperator" k) (#{"+" "-" "*" "/" "%" "&" "|" "^" "<<" ">>"} (:opcode n))))
+                            (or (abi/arith? t) (abi/ptr? t)) (not (header-node? n)))))
           (when-let [h *on-refusal*]
             (h (ex-info "codegen: constraint expression does not have type 'bool'" {:codegen/refused :constraint :cx/node n}) n))
           ::bad)))))
@@ -15058,7 +15065,13 @@
                      alt (when-not (checking?)
                            (try (if (:isNegatedConsteval n) (br e) (br a))
                                 (catch arbace.lang.ExceptionInfo x
-                                  (if (or (:codegen/refused (ex-data x)) (:codegen/not-constant (ex-data x))) :refused (throw x)))))]
+                                  (if (or (:codegen/refused (ex-data x)) (:codegen/not-constant (ex-data x))) :refused (throw x)))))
+                     ;; (cpp-sema-const, the checker: the consteval branch analyzed too, for its errors alone, as an immediate
+                     ;; function context ([stmt.if]/4, [expr.const]/16): its constexpr variables' initializers still manifestly
+                     ;; constant-evaluated, an immediate function's address no permitted result, cpp23/consteval-if12.C)
+                     _ (when (checking?)
+                         (when-let [x (if (:isNegatedConsteval n) e a)]
+                           (stmt (assoc (block-ctx ctx) :imm-ctx true) x)))]
                  (if (and alt (map? rt)) (vary-meta rt assoc ::ce-alt alt) rt))
              (let [c (block-ctx ctx)
                    ks (vec (:inner n))
@@ -16271,7 +16284,8 @@
 (defn- cx-imm-context?
   "Whether the context `ctx` is an immediate function context: a consteval function's, or one escalated."
   [ctx]
-  (let [g (some-> (:fn-id ctx) fnd)] (boolean (and g (or (:consteval g) (:cx-escalated g))))))
+  (or (boolean (:imm-ctx ctx))
+      (let [g (some-> (:fn-id ctx) fnd)] (boolean (and g (or (:consteval g) (:cx-escalated g)))))))
 
 (defn- cx-imm-addrs
   "[expr.const]/17.1: the function address nodes of the typed tree `x` naming an immediate function (consteval, or escalated)
@@ -16392,7 +16406,7 @@
              (or (and (:consteval f) (not (:cx-imm-error f))) (and (not (:consteval f)) (cx-escalated? f))))
     (let [g (some-> (:fn-id ctx) fnd)]
       (cond
-        (and g (or (:consteval g) (:cx-escalated g))) nil
+        (cx-imm-context? ctx) nil
         ;; (cpp-sweep: P2564R3's immediate-escalating functions alone, [expr.const]/18 -- a closure's call operator, a
         ;; defaulted special member, a constexpr function made by a template's instantiation -- not a constexpr function
         ;; that is none: its immediate invocations evaluated, cpp2a/consteval34.C's foo, consteval-prop1.C's f3)
