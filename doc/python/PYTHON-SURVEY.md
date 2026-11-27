@@ -9479,14 +9479,15 @@ out-of-band read-only buffer wrote it, and the loaded view stayed writable.
 The classes' 64 rows at train 7's record (mac/train-7, f3da80d1c), each probed alone (`bin/pyi check --only`, one method a
 line, on train 7's executable c04e326d97bedc4262f7) or read from train 7's own runs:
 
-- **Already passing on train 7's executable (50).** `:multiprocessing`'s 41 ProcessPoolForkserverProcessPoolExecutorTest rows
-  ("unexpected EOF", before queue 535's forkserver) pass in train 7's run but test_ressources_gced_in_workers (below) and the
-  crashes of the C `_pickle` (py-regress-1127's), TestStdinBadfiledescriptor's two and forkserver's test_rapid_restart pass;
-  of `:multiprocessing-children`, spawn's and forkserver's TestResourceTracker sigint/sigkill/sigterm (py-mp-1125's frame and
-  signal mask), both test_poll_eintr, forkserver's test_shared_memory_SharedMemoryServer_ignores_sigint (its KeyboardInterrupt
-  needs SIGINT not ignored by the run's shell: train 7's wd-run.sh), fork's and spawn's test_worker_finalization_via_atexit_handler,
-  fork's SharedMemoryManager_reuses_resource_tracker, spawn's test_finalize and test_release_task_refs. spawn's
-  test_preload_resources skips ('forkserver' only), its reference `:excluded`.
+- **Already passing on train 7's executable (58).** `:multiprocessing`'s ProcessPoolForkserverProcessPoolExecutorTest rows
+  ("unexpected EOF", before queue 535's forkserver) but test_ressources_gced_in_workers (below), 40, pass in train 7's run
+  judge-2a (in its earlier run some crashed with the C `_pickle`'s segmentation fault, py-regress-1127's); TestStdinBadfiledescriptor's
+  two and forkserver's test_rapid_restart pass. Of `:multiprocessing-children`: spawn's and forkserver's TestResourceTracker
+  sigint/sigkill/sigterm (py-mp-1125's frame and signal mask), both test_poll_eintr, forkserver's
+  test_shared_memory_SharedMemoryServer_ignores_sigint (its KeyboardInterrupt needs SIGINT not ignored by the run's shell: train
+  7's wd-run.sh), fork's and spawn's test_worker_finalization_via_atexit_handler_of_multiprocessing, fork's
+  SharedMemoryManager_reuses_resource_tracker, spawn's test_finalize and test_release_task_refs; spawn's test_preload_resources
+  skips ('forkserver' only; its reference `:excluded`).
 - **Built: the forkserver child's preload leaks nothing** (libpatch.ae's `_pyi_serve_one`): forkserver's test_preload_resources
   ("failed spawning forkserver or grandchild": two "leaked semaphore objects" warnings on stderr). mp_preload.py's
   `multiprocessing.Lock()` runs again in pyi's child (the preload and then spawn's prepare of `__mp_main__`), where a forked child
