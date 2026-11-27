@@ -10003,7 +10003,15 @@
                 {:i :list :cls (:id tu)
                  ;; (queue 460: a union's list takes its first member, a designator not read: the member's implicit
                  ;; conversion not judged)
-                 :items (binding [*cx-union-init* (or *cx-union-init* (boolean (:union c)))] (vec (map-indexed (fn [i s]
+                 :items (binding [*cx-union-init* (or *cx-union-init*
+                                                       (boolean (and (:union c)
+                                                                     ;; (cpp-sema-ovl: but a list of one item, no designator, for a
+                                                                     ;; union of no default member initializer, which initializes its
+                                                                     ;; first member surely, [dcl.init.aggr]/5: cpp2a/desig5.C's
+                                                                     ;; `u e = { "asdf" };` of `union u { int a; const char* b; }`)
+                                                                     (not (and (checking?) (nil? (:field src)) (not (:desigs src)) (not nsdmi-u)
+                                                                               (= 1 (count items)) (map? (first items))
+                                                                               (not= :init-list (:op (first items))))))))] (vec (map-indexed (fn [i s]
                                             ;; (the native parser's semantic list holds a default member initializer's
                                             ;; place as CXXDefaultInitExpr, :default-init: the member's own initializer)
                                             (if (and (< i (count items)) (not= :default-init (:op (nth items i))))
@@ -11982,25 +11990,48 @@
         ;; y as its first operand and x as its second, against the best non-member candidate taken in order: one better for one
         ;; operand and worse for another, neither better, the call ambiguous; cpp2a/spaceship-rewrite3.C's `x == y` for
         ;; operator==(X, int) and operator==(Y, int))
-        _ (when (and (checking?) best (= o "==") (= 2 (count args)) (>= (long *cxx-year*) 20) (not (contains? ms best))
-                     (not (:tinst (fnd best))) (= 2 (count (:ps (:ty (fnd best))))))
+        _ (when (and (checking?) best (= o "==") (= 2 (count args)) (>= (long *cxx-year*) 20)
+                     (= (if (contains? ms best) 1 2) (count (:ps (:ty (fnd best))))))
             (let [[l r] args
-                  bps (:ps (:ty (fnd best)))
-                  bc [(ics l (first bps)) (ics r (second bps))]
+                  ;; (a member's implicit object parameter, [over.match.funcs]/4: an lvalue reference to its class, const for a
+                  ;; const member function)
+                  objics (fn [o g] (when (not (:refq g)) (ics o {:k :ref :to (cond-> {:k :class :id (:cls g)} (:cq g) (assoc :c true))})))
+                  bg (fnd best)
+                  bps (:ps (:ty bg))
+                  bc (if (contains? ms best) [(objics l bg) (ics r (first bps))] [(ics l (first bps)) (ics r (second bps))])
                   ne (fn [g] (let [ps (mapv #(abi/unq (abi/non-ref %)) (:ps (:ty g)))]
                                (some #(let [h (fnd (:id %))] (and (= :fn (:e %)) h (not (:cls h)) (= ps (mapv (fn [t] (abi/unq (abi/non-ref t))) (:ps (:ty h))))))
-                                     (try (lookup (:scope ctx) "operator!=") (catch arbace.lang.ExceptionInfo _ nil)))))]
+                                     (try (lookup (:scope ctx) "operator!=") (catch arbace.lang.ExceptionInfo _ nil)))))
+                  rcid (class-id (:ty r))
+                  ;; (the reversed member candidates, y.operator==(x): the members of y's class, its operator templates'
+                  ;; specializations deduced from x, as for x's)
+                  rms (when (and rcid (not (seq (conv-tmpls rcid))))
+                        (let [rtm (vec (keep (fn [[_ x]] (when (and (= :tmpl (:e x)) (= :fn (:tk x))) (:id x))) (class-lookup rcid nm)))
+                              rsp (when (and (seq rtm) (:call-candidates @hooks))
+                                    (try ((:call-candidates @hooks) ctx {:op :fnset :fns [] :name nm :tmpls rtm :obj r} [l])
+                                         (catch arbace.lang.ExceptionInfo _ nil)))]
+                          (when-not (pos? (long (or (:unsure-drops (meta rsp)) 0)))
+                            (concat (second (method-set-of rcid nm)) rsp))))
+                  same? (fn [f] (or (= f best) (let [a (:tinst (fnd f)) b (:tinst bg)] (and a b (= (:tid a) (:tid b))))))
+                  judge! (fn [f rc]
+                           ;; (the same function reversed, or another specialization of its template: GCC's pedwarn "C++20 says
+                           ;; that these are ambiguous, even though the second is reversed", an error under -pedantic-errors)
+                           (when (and (every? some? rc) (some true? (map better-ics? rc bc)) (some true? (map better-ics? bc rc))
+                                      (or (not (same? f)) *pedantic-errors*))
+                             (fail :overload "ambiguous call (operator== and a reversed candidate)")))]
               (when (every? some? bc)
                 (doseq [f (distinct frees) :let [g (fnd f) ps (:ps (:ty g))]
-                        :when (and (not (:tinst g)) (not (:cls g)) (= 2 (count ps)) (not (:va (:ty g))) (not (ne g)))
-                        ;; (by operand: x's conversion to the second parameter, y's to the first)
-                        :let [rc [(ics l (second ps)) (ics r (first ps))]]
-                        :when (every? some? rc)]
-                  ;; (the same function reversed: GCC's pedwarn "C++20 says that these are ambiguous, even though the second
-                  ;; is reversed", an error under -pedantic-errors)
-                  (when (and (some true? (map better-ics? rc bc)) (some true? (map better-ics? bc rc))
-                             (or (not= f best) *pedantic-errors*))
-                    (fail :overload "ambiguous call (operator== and a reversed candidate)"))))))]
+                        :when (and (not (:tinst g)) (not (:cls g)) (= 2 (count ps)) (not (:va (:ty g))) (not (ne g)))]
+                  ;; (by operand: x's conversion to the second parameter, y's to the first)
+                  (judge! f [(ics l (second ps)) (ics r (first ps))]))
+                (doseq [f (distinct rms) :let [g (fnd f) ps (:ps (:ty g))]
+                        :when (and g (:cls g) (not (:static g)) (= 1 (count ps)) (not (:va (:ty g))) (not (:explicit-obj g))
+                                   ;; (no operator!= member corresponding to it, [over.match.oper]/4)
+                                   (not-any? #(let [h (fnd %)] (and h (= (mapv (fn [t] (abi/unq (abi/non-ref t))) (:ps (:ty h)))
+                                                                         (mapv (fn [t] (abi/unq (abi/non-ref t))) ps))
+                                                                    (= (boolean (:cq h)) (boolean (:cq g)))))
+                                             (second (method-set-of (:cls g) "operator!="))))]
+                  (judge! f [(ics l (first ps)) (objics r g)])))))]
         (cond
           (nil? best) (cond (#{"<" ">" "<=" ">="} o) (rewritten-relational ctx o args)
                             ;; (CP338 (a): none viable, a != b's rewritten candidate !(a == b), [over.match.oper]/3.4: a
