@@ -13187,7 +13187,13 @@
                       (when (:unavailable (var* (:id v)))
                         (fail :unavailable "'" (:name (var* (:id v))) "' is unavailable")))
                     x)
-    "CXXThisExpr" (this-expr ctx)
+    ;; (cpp-read-indep, the checker: [expr.prim.id.general]/3 (C++23 /4), a non-static member named in a function that is no
+    ;; non-static member function -- a friend function defined in its class, a static member function -- has no implicit object
+    ;; (the parser's implicit this): GCC's "invalid use of non-static data member 'A<0>::i'", template/error42.C)
+    "CXXThisExpr" (if (and (checking?) (:implicit n) (not (:lambda ctx)) (nil? (:this-type ctx)) (nil? *constraint-this*)
+                           (not @#'*unevaluated*) (:fn-id ctx) (fnd (:fn-id ctx)))
+                    (fail :nonstatic-use "invalid use of non-static data member (no object in a function that is no non-static member)")
+                    (this-expr ctx))
     "UnaryOperator"
     (or
      ;; &C::m: a pointer to member ([expr.unary.op]/4)
@@ -13648,7 +13654,11 @@
                        (not (abi/ptr? (abi/unq (:ty (rv a))))) (not (abi/ptr? (abi/unq (:ty (rv i))))))
               (throw (ex-info "codegen: subscripted value is neither array nor pointer" {:codegen/refused :subscript :cx/node n})))
             (cx-subscript-incomplete! p)
-            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p)) :cat :lv})))))
+            ;; (cpp-read-indep, the checker: [expr.sub]/2 since C++17 (CWG 1213), the subscript of an array operand that is an
+            ;; xvalue -- a prvalue's member array, materialized -- is an xvalue, no lvalue: so `&(a.getB().x[0])` takes the address
+            ;; of an rvalue, GCC's "taking address of rvalue", pr60517.C)
+            {:op :deref :e {:op :ptradd :o "+" :p p :n (convert-scalar ix abi/long* false) :ty (:ty p) :cat :pr} :ty (:to (:ty p))
+             :cat (if (and (checking?) (>= (long *cxx-year*) 17) (abi/arr? (abi/unq (abi/non-ref (:ty a)))) (#{:xv :pr} (:cat a))) :xv :lv)})))))
     ("CStyleCastExpr" "CXXStaticCastExpr" "CXXReinterpretCastExpr" "CXXConstCastExpr" "CXXFunctionalCastExpr")
     (if-let [ct (when (= "CXXFunctionalCastExpr" (:kind n)) (ctad-template (:scope ctx) (get-in n [:type :qualType])))]
       (ctad-expr ctx n ct)
