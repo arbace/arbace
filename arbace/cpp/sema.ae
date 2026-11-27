@@ -2195,14 +2195,19 @@
          ;; expression -- `bool(T(1))` for T = int*, a reinterpret_cast, [expr.const]/5.15 -- makes the program ill-formed, not
          ;; the constraint false: the checker's evaluator's sure refusal (h-cpp-consteval's :cx/sure) reported at its operation,
          ;; the constraint then not satisfied: cpp2a/concepts-pr98644.C)
-         (if-let [y (when (and (checking?) (not (:cx/sure (ex-data e))) (not (sure-failure? e)) (map? rc) (not (header-node? rc))
+         (if-let [y (when (and (checking?) (not (sure-failure? e)) (map? rc) (not (header-node? rc))
                                  ;; (not for a recursion found, nor deep in nested satisfactions: cpp2a/concepts-recursive-sat1.C)
                                  (not= :depth (:codegen/refused (ex-data e))) (not (re-find #"depends on itself" (str (ex-message e))))
-                                 (<= (long *constraint-depth*) 1))
+                                 ;; (cpp-sema-const: a nested requirement's too, one level within a concept's satisfaction:
+                                 ;; `requires b;` of a requires-expression's parameter, cpp2a/concepts-pr67697.C)
+                                 (<= (long *constraint-depth*) 2))
+                      (if (:cx/sure (ex-data e))
+                        ;; (cpp-sema-const: the satisfaction's own evaluation already sure)
+                        e
                       (try (let [x (binding [*cutoff* (long (or (:cx-cutoff scope) Long/MAX_VALUE))] (analyze {:scope scope} rc))]
                              (binding [*ce-manifest* true] (ce-eval (convert-scalar (rv x) abi/bool* false)))
                              nil)
-                           (catch arbace.lang.ExceptionInfo y (when (:cx/sure (ex-data y)) y))))]
+                           (catch arbace.lang.ExceptionInfo y (when (:cx/sure (ex-data y)) y)))))]
            (do (when-let [h *on-refusal*]
                  (h (ex-info (str "codegen: expression is not a constant expression (" (subs (str (ex-message y)) (min (count (str (ex-message y))) (count "not a constant: "))) ")")
                              {:codegen/refused :constexpr :cx/node (if-let [at (:cx/at (ex-data y))] {:range at} rc)})
@@ -5891,7 +5896,8 @@
                            ;; (cpp-sema-const, the checker: [stmt.return]/4, flowing off the end of a function that returns a
                            ;; value is undefined, so no constant expression, [expr.const]/5.8: GCC's "control reaches end of
                            ;; non-void function" in the call's expansion, cpp1y/constexpr-return2.C)
-                           (and (checking?) (= :normal (first r)) (not= "main" (:name f)) (not (:coroutine f)))
+                           (and (checking?) (= :normal (first r)) (not= "main" (:name f)) (not (:coroutine f))
+                                (not (:implicit f)) (not (:defaulted f)) (:body f) (:node f) (not (header-node? (:node f))))
                            (ub! e "'" (:name f) "' flows off the end of a function that returns a value")
                            :else (not-constant "no return")))))))
        ;; (CP374 (a): pointers into string literals and arrays, as clang's ExprConstant's LValue with its designator: a
@@ -16099,6 +16105,19 @@
                     (let [t (abi/unq (:ty fl)) x (get o (:i fl))]
                       (cond (abi/scalar? t) (when (nil? x) (str (:name c) "::" (:name fl)))
                             (and (abi/class? t) (map? x) (::cls x)) (cx-indeterminate-member x)
+                            ;; (cpp-sema-const: an array member of scalars, an element holding no value: [expr.const]/13-14's
+                            ;; indeterminate subobject, cpp2a/constexpr-init21.C's `T c[5]` with one element skipped)
+                            (and (abi/arr? t) (:n t) (abi/scalar? (abi/unq (:of t))) (not (:anon fl)))
+                            (when (or (nil? x) (and (or (vector? x) (and (map? x) (not (::cls x)))) (some nil? (map #(get x %) (range (long (:n t)))))))
+                              (str (:name c) "::" (:name fl)))
+                            (and (abi/arr? t) (:n t) (or (vector? x) (and (map? x) (not (::cls x)))) (abi/class? (abi/unq (:of t))))
+                            (some #(cond (and (map? %) (::cls %)) (cx-indeterminate-member %)
+                                         ;; (an element never initialized, of a class with a scalar member: A<s>'s b0)
+                                         (and (nil? %) (not (:union (abi/cls (:id (abi/unq (:of t)))))) (some (fn [g] (and (not (:static g)) (seq (str (:name g))) (abi/scalar? (abi/unq (:ty g)))))
+                                                             (:fields (abi/cls (:id (abi/unq (:of t)))))))
+                                         (str (:name c) "::" (:name fl))
+                                         :else nil)
+                                  (map #(get x %) (range (long (:n t)))))
                             :else nil))))
                 (:fields c))
           (some (fn [b] (let [x (get o [:b (:cls b)])] (when (and (map? x) (::cls x)) (cx-indeterminate-member x)))) (:bases c))))))
