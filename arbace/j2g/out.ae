@@ -2010,10 +2010,56 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                  (apply list 'lit '(slice (func [])) (for [n classes] (m/class-sym pkg n "_Init")))
                  (apply list 'lit '(slice string) (map m/go-qualified-name classes))))]))
 
+(defn- go-fn-name
+  "The Go function name runtime.Frame.Function gives top-level form f of package pkg (a go/func's pkg.F, a go/method's
+  pkg.(*T).M or pkg.T.M by its receiver's tag), or nil for another form or a generic function."
+  [pkg f]
+  (when (and (seq? f) (#{'go/func 'go/method} (first f)) (symbol? (second f)))
+    (let [[_ nm & more] f
+          params (first (filter vector? more))]
+      (when (and params (not (some #{:type-params} more)))
+        (str (nm/pkg-path pkg) "."
+             (if (= 'go/func (first f))
+               nm
+               (let [rt (:tag (meta (first params)))]
+                 (cond (and (seq? rt) (= '* (first rt)) (symbol? (second rt))) (str "(*" (second rt) ")." nm)
+                       (symbol? rt) (str rt "." nm)))))))))
+
+(defn literal-frames
+  "java-ffm-1127: the frames of the lambdas' and method references' Go function literals in class n's top-level forms
+  (code/lambda-val, method-ref-val: a literal tagged :j2g/frame), [go-name class method elide] each, named as gc names a
+  function literal: its function's name and .funcK, K counting the function's literals in source order from 1, a literal
+  in a literal L L's name and .K (cmd/compile/internal/ir's closureName; an inlined function's literals keep their
+  names). A lambda's literal is the frame of javac's lambda$M$N method of its class, a method reference's is elided (the
+  JVM's frame of it is its hidden class's, which the adapter's frame stands for: StackWalker hides it). A literal whose
+  tag was lost to a rewrite has no entry: its frame is its function's, as a try body's."
+  [n forms]
+  (let [pkg (m/pkg n)
+        out (volatile! [])]
+    (doseq [f forms
+            :let [g (go-fn-name pkg f)]
+            :when g]
+      (letfn [(scan [x prefix nested ^objects k]
+                (cond
+                  (and (seq? x) (= 'fn (first x)))
+                  (let [i (aset k 0 (inc (aget k 0)))
+                        nm (str prefix (if nested "." ".func") i)]
+                    (when-let [fr (:j2g/frame (meta x))]
+                      (vswap! out conj [nm (str/replace (or (:class fr) n) "/" ".") (or (:method fr) "") (boolean (:elide fr))]))
+                    (let [k2 (object-array [0])]
+                      (doseq [y (rest x)] (scan y nm true k2))))
+                  (or (seq? x) (vector? x)) (doseq [y x] (scan y prefix nested k))
+                  (map? x) (doseq [[a b] x] (scan a prefix nested k) (scan b prefix nested k))
+                  :else nil))]
+        (let [k (object-array [0])]
+          (doseq [y (nnext f)] (scan y g false k)))))
+    @out))
+
 (defn frames-forms
   "The frame table (§7.9.6, amendment J4): entries for methods whose Java names the demangler
   cannot read back (names with _ or $, or not starting with a lower case letter: the demangler
-  lowers the Go name's first letter, GenerifyStackTraces' A(), t04684)."
+  lowers the Go name's first letter, GenerifyStackTraces' A(), t04684); since java-ffm-1127 the
+  lambdas' and method references' function literals (literal-frames, merged in the package state's :frames)."
   [pkg classes]
   (let [entries (for [n classes
                       :when (a/decl n)
@@ -2035,7 +2081,11 @@ properties (stringPropertyNames, the defaults' too); null leaves them as they ar
                             ;; a class initialized at start: the guard-free entry too (Futamura F4)
                             gofns (if (and static (m/start-class? n)) [gofn (str gofn "_NoInit")] [gofn])]
                       gf gofns]
-                  (list 'lit '_ gf (str/replace n "/" ".") (:name mm) 0))]
+                  (list 'lit '_ gf (str/replace n "/" ".") (:name mm) 0))
+        ;; java-ffm-1127: the lambdas' and method references' literals (literal-frames), sorted by their Go names
+        entries (concat entries
+                        (for [[gn cls mth elide] (sort-by first (distinct (some-> (:frames c/*pkgstate*) deref)))]
+                          (list 'lit '_ gn cls mth (if elide 1 0))))]
     (when (seq entries)
       [(list 'go/func 'init []
              (list (m/jrt-sym pkg "RegisterFrames") (apply list 'lit (list 'slice (m/jrt-sym pkg "FrameInfo")) entries)))])))

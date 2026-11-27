@@ -1,9 +1,102 @@
 ;; Go-build variant of java.nio.Buffer (J2G-SPEC §4.6; JRT-NOTES.md, "The JDK's resource data"):
 ;; read by j2g only. Buffer's static initializer gives jdk.internal.access.SharedSecrets the
-;; package's JavaNioAccess (direct and mapped buffers, memory segments, the buffer pool: all
-;; outside the Go build's world, as SharedSecrets' setter); the variant removes it, so that the
-;; heap buffers initialize. Copyright (c) the Arbace authors; Eclipse Public License 1.0.
+;; package's JavaNioAccess. Until java-ffm-1127 the variant removed it (direct and mapped buffers,
+;; memory segments and the buffer pool were outside the Go build's world); since then the access is
+;; in the world (a derived overlay without getDirectBufferPool: VM.BufferPool is a nested interface
+;; of jrt's hand-written VM) and SharedSecrets holds it (arbace.j2g.model/serial-accessors, which
+;; initializes Buffer when it is asked first), so that the foreign memory API's segments make their
+;; buffers and read a buffer's (AbstractMemorySegmentImpl.NIO_ACCESS: asByteBuffer, ofBuffer;
+;; "class jdk.internal.access.JavaNioAccess is not in the closed world", t05828-t05830 t07775 and
+;; the native segments' t03584 t03640 t05096 t05812). The access is jdk26u's anonymous class (baf63fb;
+;; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) as
+;; repr/java converts it, but for what the Go build has not: no getDirectBufferPool (the
+;; management beans' pool); java.nio.Bits is not in the world, so reserveMemory and unreserveMemory
+;; keep no count (jrt's native memory is Go's, outside -XX:MaxDirectMemorySize: no
+;; OutOfMemoryError for direct memory) and pageSize is Unsafe's (Bits.pageSize's); the mapped
+;; memory's operations (MappedMemoryUtils, its natives over the mapping) are those of jrt's mapped
+;; buffers, a heap copy (overlay/jdk/java.base/java/nio/MappedByteBuffer.java: loaded, load and
+;; unload nothing, force nothing without a file; no mapped segment is made in the Go build). The rest
+;; Copyright (c) the Arbace authors; Eclipse Public License 1.0.
 (in-ns 'java.nio)
 
 (j2g/variant Buffer
-  (j2g/cut (static-initializer 0)))
+  (static-initializer
+    (SharedSecrets/setJavaNioAccess
+      (anon JavaNioAccess []
+        (method ^:public newDirectByteBuffer ^ByteBuffer [this ^long addr ^int cap obj
+                                                          ^MemorySegment segment]
+          (DirectByteBuffer. addr cap obj segment))
+
+        (method ^:public newMappedByteBuffer ^ByteBuffer [this ^UnmapperProxy unmapperProxy
+                                                          ^long address ^int cap obj
+                                                          ^MemorySegment segment]
+          (if (nil? unmapperProxy)
+              ^ByteBuffer (DirectByteBuffer. address cap obj segment)
+              ^ByteBuffer (DirectByteBuffer. address
+                                             cap
+                                             obj
+                                             (.fileDescriptor unmapperProxy)
+                                             (.isSync unmapperProxy)
+                                             segment)))
+
+        (method ^:public newHeapByteBuffer ^ByteBuffer [this ^byte/1 hb ^int offset ^int capacity
+                                                        ^MemorySegment segment]
+          (HeapByteBuffer. hb -1 0 capacity capacity offset segment))
+
+        (method ^:public newDirectByteBuffer ^ByteBuffer [this ^long addr ^int cap]
+          (DirectByteBuffer. addr cap))
+
+        (method ^:public ^{ForceInline true} getBufferBase [this ^Buffer buffer]
+          (.base buffer))
+
+        (method ^:public getBufferAddress ^long [this ^Buffer buffer]
+          (.-address buffer))
+
+        (method ^:public unmapper ^UnmapperProxy [this ^Buffer buffer]
+          (when-instance [^MappedByteBuffer mbb buffer] (.unmapper mbb)))
+
+        (method ^:public bufferSegment ^MemorySegment [this ^Buffer buffer]
+          (.-segment buffer))
+
+        (method ^:public acquireSession ^void [this ^Buffer buffer]
+          (let [scope (.session buffer)] (when (some? scope) (.acquire0 scope))))
+
+        (method ^:public releaseSession ^void [this ^Buffer buffer]
+          (try
+            (let [scope (.session buffer)] (when (some? scope) (.release0 scope)))
+            (finally (Reference/reachabilityFence buffer))))
+
+        (method ^:public isThreadConfined ^boolean [this ^Buffer buffer]
+          (let [scope (.session buffer)] (and (some? scope) (some? (.ownerThread scope)))))
+
+        (method ^:public hasSession ^boolean [this ^Buffer buffer]
+          (some? (.session buffer)))
+
+        ;; Arbace: jrt's mapped buffers' operations (a heap copy), not MappedMemoryUtils' natives
+        (method ^:public mappedMemoryUtils ^MappedMemoryUtilsProxy [this]
+          (anon MappedMemoryUtilsProxy []
+            (method ^:public isLoaded ^boolean [this ^long address ^boolean isSync ^long size] true)
+            (method ^:public load ^void [this ^long address ^boolean isSync ^long size])
+            (method ^:public unload ^void [this ^long address ^boolean isSync ^long size])
+            (method ^:public force ^void [this ^java.io.FileDescriptor fd ^long address ^boolean isSync
+                                          ^long index ^long length])))
+
+        ;; Arbace: no java.nio.Bits (no direct memory count or limit in the Go build)
+        (method ^:public reserveMemory ^void [this ^long size ^long cap])
+
+        (method ^:public unreserveMemory ^void [this ^long size ^long cap])
+
+        ;; Arbace: Bits.pageSize's answer, Unsafe's
+        (method ^:public pageSize ^int [this] (.pageSize UNSAFE))
+
+        (method ^:public ^{ForceInline true} scaleShifts ^int [this ^Buffer buffer]
+          (.scaleShifts buffer))
+
+        (method ^:public ^{ForceInline true} heapSegment ^AbstractMemorySegmentImpl [this
+                                                                                     ^Buffer buffer
+                                                                                     base
+                                                                                     ^long offset
+                                                                                     ^long length
+                                                                                     ^boolean readOnly
+                                                                                     ^MemorySessionImpl bufferScope]
+          (.heapSegment buffer base offset length readOnly bufferScope))))))

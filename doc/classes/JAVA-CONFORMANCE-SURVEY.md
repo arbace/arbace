@@ -5612,3 +5612,60 @@ interpreter's frames and access checks, t05254's auxiliary class, t08092, t08235
 passing again; 33 to their classes under the user's stricter print judge, 556b-1 (a)). Java: read 7,844 / 0 / 0, eval
 3,222 / 0 / 31, AOT 3,238 / 0 / 37, print 3,291 / 0 / 34. Left: FFM's eight rows (JavaNioAccess, VM.isDirectMemoryPageAligned),
 XML's six (ModuleDescriptor$Builder, XSLTC's internal error), t05766 compiled.
+
+## As built: java-ffm-1127, the foreign memory API's buffers, XML's resources and translets, lambda frames (2026-11-27; branch `java-ffm-1127`, from mac/next `120b1b912`)
+
+Diagnosed on train 8's executables (`04cc536dc3788fa7cfd4`, javac's tool `javac-9a1f4720034459311183`) by single tests and
+probes (`bin/repr-java read` of a probe's Java, run by `test/java/run.ae` on the tool). Built, waiting for a Java train's build
+(every row below runs translated code: jrt-convert's update, the gate build and javac's tool):
+- **java.nio's access in the world** (`:jd1123-next-train`'s eight FFM rows, interp and compiled). The segments' buffers
+  (`HeapMemorySegmentImpl.makeByteBuffer`, a native segment's `asByteBuffer`, `ofBuffer`) and the native segments' reservation
+  ask `AbstractMemorySegmentImpl.NIO_ACCESS`, `SharedSecrets.getJavaNioAccess()`: "class jdk.internal.access.JavaNioAccess is
+  not in the closed world" (t05828-t05830 t07775). jdk.internal.access.JavaNioAccess a derived overlay (test/jrt/derive.ae,
+  `ffm-nio-access-derivation`: without `getDirectBufferPool`, whose `VM.BufferPool` is a nested interface of jrt's hand-written
+  VM), with jdk26u's `jdk.internal.access.foreign.UnmapperProxy` and `MappedMemoryUtilsProxy` (test/jrt/jrt_sources.ae's
+  ffm-sources); SharedSecrets holds it through j2g's accessors (`arbace.j2g.model/serial-accessors`, owner java.nio.Buffer);
+  Buffer's variant sets it again in its static initializer (overlay/jdk/variants/Buffer.ae: jdk26u's anonymous access but the
+  pool; no java.nio.Bits in the world, so `reserveMemory`/`unreserveMemory` keep no count and `pageSize` is Unsafe's; the
+  mapped memory's operations jrt's mapped buffers' heap copy). `AbstractMemorySegmentImpl.bufferRef` without
+  sun.nio.ch.DirectBuffer (j2g stubbed it: every Go build buffer is backed by an array, so the array; the derivation's new op).
+- **VM.isDirectMemoryPageAligned** (t03584 t03640 t05096 t05812: SegmentFactories' native allocation, "jrt lacks"): jrt's
+  `VM_IsDirectMemoryPageAligned__Z` false (no saved properties: a JVM without `-Dsun.nio.PageAlignDirectMemory=true`), and
+  `Unsafe.pageSize` (the host's page size, os.Getpagesize) for the access's pageSize; `bin/jrt manifest` regenerated (it also
+  picked up ClassLoader.getUnnamedModule and Module.addExports, in jrt since queue 575 but not in the manifest).
+- **java.xml's resources** (t08094-t08096, "internal error" from XSSimpleTypeDecl.applyFacets1). Probed on the tool: Xerces'
+  regular expressions load `com.sun.org.apache.xerces.internal.impl.xpath.regex.message` ("Installation Problem???  Couldn't
+  load messages"), so every XML Schema's built-in `language` type failed; with java.xml's properties on ARBACE_PATH the
+  schema then failed parsing the JDK's built-in catalog (`jdk/xml/internal/jdkcatalog/JDKCatalog.xml`, named by its jrt: URL);
+  with jdk26u's `src/java.xml/share/classes` on ARBACE_PATH all three pass interpreted (status 0). Built: `bin/jrt-convert`'s
+  data step puts java.xml's resources into jdk/data as `make/modules/java.xml/Java.gmk` puts them into the module (`xml_clean`:
+  the .dtd/.xsd/.xml/.ent/.mod files copied, the base locale's .properties cleaned by JavaCompilation.gmk's rule; 108 files,
+  byte for byte the JDK build's `modules/java.xml`, which generated.edn's :data now compares them with), so the executables
+  embed them; URL's default jar: handler is jrt's class path's (`ClassPathResources.jarHandler`, the EmbeddedHandler, which
+  opens a jar: URL naming the executable as its embedded resource however the URL was made and any other jar file the JDK's
+  way: a URI read back, the catalog's relative DTDs resolved against it); the tool world's CatalogHolder variant takes the
+  embedded catalog's URI after ARBACE_PATH's. LICENSE.md: the resources' item and the W3C notices of the catalog's files.
+- **XSLTC's translets** (t08083 t08091 t08093, "ModuleDescriptor$Builder is not in the closed world"). The tool world's
+  TemplatesImpl variant now replaces defineTransletClasses (no descriptor; the loader's unnamed module, as createModule's
+  variant had it) and cuts createModule. Probed: a translet XSLTC wrote (`generate-translet`) and defined through
+  `Lookup.defineClass` on the tool stops at "a class extending ...AbstractTranslet is not in the Go build": AbstractTranslet
+  joins `arbace.j2g.model/class-supers` (javac's tool world alone). Not probed past that: the translet's bytecode calling
+  XSLTC's runtime through JD3's interpreter.
+- **The frames of lambdas and method references in compiled code** (t05766 compiled, "Bad method name"). A lambda's or a method
+  reference's Go function literal, unregistered, stood for its enclosing method: TestInferCaller's `testLambda(count,
+  logger::severe, ...)` inferred the caller `test5` (the literal's), where the JDK's walk hides the reference's frame (its
+  hidden class) and finds `testLambda`. j2g tags the literals (code/lambda-val: javac's `lambda$M$N` of its class;
+  method-ref-val: elided) and registers them in the frame table by gc's names (`out/literal-frames`: the function's
+  `.funcK`, a literal in a literal `.K`, counted in source order: cmd/compile's closureName, checked on a Go program, an
+  inlined function's literals keeping their names); jrt's frameOf takes a try body's literal in a lambda as the lambda's
+  frame. The diagnosis is by reading (train 8's record keeps the message's first line); the compiled run that would show
+  the expected and actual names waited behind train 9 (`.tmp/worktrees/java-ffm-1127-base/.tmp/c5766.sh`). j2g unit test
+  `test-ffm-1127`.
+
+Proven by day: `bin/jrt-convert derive --check` (111 overlays); `bin/jrt-convert predict --list` of the eight FFM rows (light:
+2.9 GB): the changed files read with context, their forms laid into jdk/forms (JavaNioAccess, the proxies, ClassPathResources;
+the provenance's counts by hand, 3,866 sources, 4,112 forms, 130 data), vet 151 variants with Buffer's replacing its
+initializer (one refusal, SHA3's, the same on 1e5fa9c99), j2g's analysis of the world with no stub left in Buffer, the
+segments' JavaNioAccess and SegmentFactories (the remaining FFM stubs are the var handles', Reflection's and VectorSupport's,
+as before), all eight rows analyzed at the compiled level; `bin/javac-vendor names` (7,192 and 10,841 classes, 0 Go names
+twice); `bin/j2g-unit`'s new test (the other 7 failures the same on next).

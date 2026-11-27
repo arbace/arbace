@@ -1,13 +1,58 @@
 ;; Tool-build variant of com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl (java-design-1123's XML in javac's
-;; tool world; train 4): read by j2g only, in the world of javac's tool build. jdk26u's createModule defines the translets'
-;; dynamic module "jdk.translet" in a module layer over a ModuleFinder of one anonymous ModuleReference; the Go build has
-;; no java.lang.module layers (ModuleReference, Configuration and ModuleLayer.defineModules are not in the world), and
-;; j2g's translation of the finder captured the reference of a class outside the world. The translets go to their
-;; loader's unnamed module instead (ClassLoader.getUnnamedModule, jrt's since queue 575), to which TemplatesImpl's
-;; module exports the packages translets use (Module.addExports). Copyright (c) the Arbace authors; Eclipse Public
-;; License 1.0.
+;; tool world; train 4): read by j2g only, in the world of javac's tool build. jdk26u's defineTransletClasses describes
+;; the translets' dynamic module "jdk.translet" (ModuleDescriptor.newModule's builder) and createModule defines it in a
+;; module layer over a ModuleFinder of one anonymous ModuleReference; the Go build has no java.lang.module descriptors or
+;; layers (ModuleDescriptor and its Builder, ModuleReference, Configuration and ModuleLayer.defineModules are not in the
+;; world: train 8's run, "ModuleDescriptor$Builder is not in the closed world", t08083 t08091 t08093). The translets go
+;; to their loader's unnamed module instead (ClassLoader.getUnnamedModule, jrt's since queue 575), to which TemplatesImpl's
+;; module exports the packages translets use (Module.addExports) and which it reads (Module.addReads), as jdk26u's code
+;; does for "jdk.translet"; createModule is cut (its descriptor's type is outside the world). defineTransletClasses is
+;; jdk26u's (baf63fb; Copyright (c) Oracle and/or its affiliates, GPL 2 with the Classpath Exception: LICENSE.md) as
+;; repr/java converts it but for the module's descriptor and layer; the rest Copyright (c) the Arbace authors; Eclipse
+;; Public License 1.0.
 (in-ns 'com.sun.org.apache.xalan.internal.xsltc.trax)
 
 (j2g/variant TemplatesImpl
-  (method ^:private createModule ^Module [this ^ModuleDescriptor descriptor ^ClassLoader loader]
-    (.getUnnamedModule loader)))
+  (j2g/cut ^:private createModule ^Module [this ^ModuleDescriptor descriptor ^ClassLoader loader])
+
+  (method ^:private defineTransletClasses :throws [TransformerConfigurationException] ^void [this]
+    (when (nil? _bytecodes)
+      (let [err (ErrorMsg. ErrorMsg/NO_TRANSLET_CLASS_ERR)]
+        (throw (TransformerConfigurationException. (.toString err)))))
+    (let [loader (TransletClassLoader. (ObjectFactory/findClassLoader)
+                                       (.getExternalExtensionsMap _tfactory))]
+      (try
+        (let [^:final classCount (alength _bytecodes)]
+          (set! _class (new Class/1 classCount))
+          (when (> classCount 1) (set! _auxClasses (HashMap.)))
+          (let [pn (.getPackageName _tfactory)]
+            (java-assert (and (some? pn) (> (.length pn) 0)))
+            ;; Arbace: the loader's unnamed module, not a module "jdk.translet" in a layer of its own
+            (let [m (.getUnnamedModule loader)
+                  thisModule (.getModule TemplatesImpl)
+                  perms (.newPermissionCollection (RuntimePermission. "*"))]
+              (.forEach (Arrays/asList Constants/PKGS_USED_BY_TRANSLET_CLASSES)
+                        (lambda Consumer ^void [^String p]
+                          (.addExports thisModule p m)
+                          (.add perms (RuntimePermission. (java-str "accessClassInPackage." p)))))
+              (let [codeSource (CodeSource. nil (cast CodeSigner/1 nil))
+                    pd (ProtectionDomain. codeSource perms loader nil)]
+                (.addReads thisModule m)
+                (loop [^int i 0]
+                  (when (< i classCount)
+                    (aset _class i (.defineClass loader (aget _bytecodes i) pd))
+                    (let [^:final ^{:tag (Class ?)} superClass (.getSuperclass (aget _class i))]
+                      (if (.equals (.getName superClass) ABSTRACT_TRANSLET)
+                          (do (set! _transletIndex i) (recur (unchecked-inc-int i)))
+                          (do
+                            (.put _auxClasses (.getName (aget _class i)) (aget _class i))
+                            (recur (unchecked-inc-int i)))))))
+                (when (< _transletIndex 0)
+                  (let [err (ErrorMsg. ErrorMsg/NO_MAIN_TRANSLET_ERR _name)]
+                    (throw (TransformerConfigurationException. (.toString err)))))))))
+        (catch ClassFormatError e
+          (let [err (ErrorMsg. ErrorMsg/TRANSLET_CLASS_ERR _name)]
+            (throw (TransformerConfigurationException. (.toString err) e))))
+        (catch LinkageError e
+          (let [err (ErrorMsg. ErrorMsg/TRANSLET_OBJECT_ERR _name)]
+            (throw (TransformerConfigurationException. (.toString err) e))))))))
