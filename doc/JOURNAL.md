@@ -27536,3 +27536,14 @@ read 3,736 / 0 / 0, eval 43,882 / 0 / 0, AOT 151 / 0 / 0, print 2,796 / 0 / 0, c
 records-check 0, markers ok, bin/pyi divergences rc 0. No hold. No bin/gate (the user's rule).
 Alternatives considered: committing the writer's reordered record (a 9,294-line diff with no content change); a whole Python run (the
 gate's, not this train's).
+
+## 2026-11-28 — The user's confirmations: 540-2 for sqlite3.c; Python's other 395 modules to the gate's full runs
+
+- The user confirmed (2026-11-28) the coordinator's overnight application of DECISION 540-2 (n/a, :objects-layout: gcc -O0's
+  objects differ by a one-line `if (...) continue;` the :lines print lays over two lines) to a second instance, sqlite3.c's
+  jsonEachPathLength (train 10's record, test/c/divergences-print.edn); :macro-context stays dropped and C's completeness 1.0.
+- Python's completeness (1.0 since train 10, the held rows cleared by train 11) rests on the 134 modules trains 7-11 re-recorded;
+  the other 395 of Lib/test keep earlier trains' records. The user's decision (2026-11-28): no dedicated whole run; the gate's
+  --full and nightly Python steps cover them when gates resume. Alternative not taken: a 529-module records run (about 8 h).
+- The user approved the consolidation gate on next (the essential gate) and task 613 (Java's interpreter call path, 612-2 (b))
+  to start now.
