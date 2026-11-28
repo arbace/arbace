@@ -9746,3 +9746,43 @@ test_poll_eintr the selection test_access + the row). With the changes:
   - test_poll_eintr: on goi the probe's handler runs, and `check --only` over test_access + the row for spawn and
     forkserver: 45 of 45, both rows "now pass".
 - gofmt, go vet and go test (`bin/pyi runtime vet`) clean; `git status` clean on go/arbace/pytls after the read.
+
+## As built: py-regress3-1128, train 10's two held rows at their causes (2026-11-28, the main host)
+
+Train 10's records (mac/train-10, built at 451d5e73d, executables `.tmp/gate-exe/d22de370513411678d84`) held two rows at
+their old passes. Each was probed on train 10's executable (`bin/pyi check --only`, `PYI_RUNTIME_REQUIRE=compiled`), and the
+fixes were verified natively: `bin/pyi launcher` on that executable compiles the checkout's runtime into the compiled
+launcher, and the driver `test/python/libtest_run.py` runs on it as the runner starts it. A copy of train 10's own launcher
+in the same harness was the control. Commits on py-regress3-1128: 1df96a88a (pyctypes' cycles.go), 9a45247f9 (py's aot.go
+and interp.go). No record or class was edited.
+
+- **test_xml_etree_c's BasicElementTest.test_cyclic_gc** ("<...Dummy object> is not None"; `1df96a88a`). It fails alone too
+  (`bin/pyi check --only`). The cause is de740ca45 (py-cthreads-1127), not 532698694, 9758cb8e6 or 2a913f0ee:
+  - de740ca45 turned varProxies from a map of objects into a map of `*varProxy`, which holds the object `o` and a dict's
+    `*Dict` `d`.
+  - 609's cyHideC hides a handle that the probed C objects alone hold. It keeps the hidden proxy (once a bool, `varied`)
+    in the closure that puts it back. That closure is live on cyProbe's stack through `runtime.GC()`.
+  - So the hidden dict (an Element's attrib, holding the Dummy) stayed reachable, and the cycle d -> Element -> attrib -> d
+    looked held from outside.
+  - The fix: the proxy's `o` and `d` are cleared while it is hidden, and addVarProxy sets `d` again from `o` at the put back.
+  - Natively, the row passes on the fixed launcher and fails as recorded on train 10's launcher.
+  - 532698694 is untouched, so test_datetime's _Fast run keeps its speed (not timed again here).
+- **spawn's test_processes WithProcessesTestProcess.test_child_fd_inflation** ("2 != 1 : [22, 22, 22, 25, 25]"; `9a45247f9`).
+  Not 7bd8941e0 or c68758937: compiler.sh closes descriptors in the server, never in the child. Fork's resource-tracker fix
+  stays as it is.
+  - The cause: a compiled launcher child that misses the IR cache starts the host's compiler (hostCompile). It then keeps
+    the server's stdin pipe, stdout pipe and Go's pidfd, 3 descriptors, for the rest of its life.
+  - Spawn's `-c` command names the child's descriptors (`spawn_main(tracker_fd=N, pipe_handle=M)`), and that source is the
+    cache's key. So the children whose numbers an earlier run compiled hit the cache, and the others compiled and kept 3
+    descriptors more.
+  - Probe `.tmp/r3/p/fdp.py N`: the test's shape, each child's `/proc/self/fd`. On train 10's launcher, 5 children warm
+    gave [21 x 5], and 7 children [21 x 5, 24, 24]: the two new pipe handles missed. Whether the test fails depends on the
+    cache's state, which explains a pass in train 9's record.
+  - The fix: RunModule calls `mainCompiled` after it compiles the main module, and AotMain sets it to `hostDone` for
+    PYI_AOT_MAIN. That closes the server's stdin and waits for it. A later compile (an import the cache does not hold)
+    starts the server again, at about 0.6 s.
+  - On the fixed launcher, 9 and 11 children gave [21 x 9] and [21 x 11], with two new cache entries (two children
+    compiled). The row passes by the driver on that launcher under the big lock.
+- **Checks.** Both changes were edited in the printed Go and read back by `bin/pyi runtime read`. The launcher build's own
+  print is equal to the edited tree (`diff -r` of py and pyctypes). gofmt, go vet and go test (./py, ./pyctypes) are clean,
+  and `git status` is clean on go/arbace/pytls. The eval level needs the build.
