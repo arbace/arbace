@@ -27509,3 +27509,30 @@ interpreter's call-path rework, task 613, deferred to after the allowance reset:
 Alternatives considered: java-ffm's JavaNioAccess keeping getDirectBufferPool (it names VM.BufferPool, a nested interface jrt's VM has
 not); dropping Buffer.java from the javac step's list (the step is the closure's own check); reverting 16f1c72fc (its follow-up
 bb1095afb came first).
+
+## 2026-11-28: train 11 recorded (Python): train 10's two held rows pass by the run; Python's cells unchanged
+
+Branch `train-11` (mac) from mac/next `93275f557` (train 10), train 10's method (scripts in .tmp/t11/: train-11.sh, records-11.sh,
+wd-run.sh, judge.sh, queue.sh; tools/hold9.py, not needed). Member: py-regress3-1128 at `d6f71656e` (`1df96a88a`: pyctypes' cycles.ae,
+cyHideC's closure no longer keeps the hidden proxy's object and dict alive through runtime.GC, de740ca45's regression; `9a45247f9`: py's
+aot.ae and interp.ae, a compiled launcher child that compiled its main module ends the host's compiler, its pipes and pidfd closed by
+hostDone; the survey's "As built: py-regress3-1128"), merged as `bc2b64dba`. Before the build: markers-check ok, records-check 0
+problems, bin/pyi divergences rc 0. j2g-edge not rerun (nothing it reads moved: arbace/, overlay/, jdk/ and go/arbace/jrt as train 10's),
+provenance-check ok. Built once under the big lock (HEAVY_MEM_GIB 30): KEY20 `3760e8b9529a688afa4e` at `bc2b64dba`, 2 h 12 min, 30.6 GB
+peak, smoke ok; bin/pyi runner on it (15 min).
+
+Records (PYI_RUNTIME_REQUIRE=compiled, wd-run.sh's watchdog, `env --default-signal=INT,QUIT`), the two modules alone; the other modules
+keep their records:
+- test_xml_etree_c (16 GiB ticket), 05:53-06:06, 0 hung: BasicElementTest.test_cyclic_gc ok.
+- test.test_multiprocessing_spawn.test_processes (40 GiB ticket, HEAVY_LOCK_CAP_PCT 100, the committed limits with train 10's raise,
+  38912 MB and 14400 s), 06:06-06:12, 0 hung: WithProcessesTestProcess.test_child_fd_inflation ok.
+- The probe py-regress3-1128's `.tmp/r3/p/fdp.py 11` (the test's shape, each spawned child's /proc/self/fd) on the train's compiled
+  launcher: counts [21 x 11], all the same.
+Judged together (judge.sh all): 2 modules, 417 methods, 391 pass, 26 classed, 0 failing, 0 regressions, 0 now pass (the two rows were
+held at their pass rows by train 10); recorded by --record, nothing held. The writer reordered 9,294 lines of the record with the same
+rows; the commit keeps the record's order and takes the one row whose content changed, WithProcessesTestHeap.test_heap's reason ("87 !=
+5000" -> "1314 != 5000", a classed failure whose count varies by run). bin/reap --record and bin/crops-score --record: no change (Python
+read 3,736 / 0 / 0, eval 43,882 / 0 / 0, AOT 151 / 0 / 0, print 2,796 / 0 / 0, completeness 1.0); --judge --strict 0 problems;
+records-check 0, markers ok, bin/pyi divergences rc 0. No hold. No bin/gate (the user's rule).
+Alternatives considered: committing the writer's reordered record (a 9,294-line diff with no content change); a whole Python run (the
+gate's, not this train's).
