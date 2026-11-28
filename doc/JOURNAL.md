@@ -27413,3 +27413,99 @@ deduction, concepts, 53 rows, test/cpp/sema-pass-const.txt). Their rules are in 
 Alternatives: merging the three in one octopus merge (refused: one conflict is easier to read per pair); recording each branch's own
 run (each ran on its own base, without the others' rules: only the merged checker's run says nothing is lost); keeping ovl's
 access check beside types' (the same error twice on one line).
+
+## 2026-11-28: train 10 recorded (Java, Python, C and OCaml on one executable): Python eval 43,876 / 0 / 6 -> 43,882 / 0 / 0, C print -> 4,854 / 0 / 0
+
+Branch `train-10` (mac) from mac/next `2017d2d7b` (train 9 merged), trains 8 and 9's method (scripts in .tmp/t10/: convert-10.sh,
+train-10.sh, tool-10.sh, thr-10.sh, records-10.sh, wd-run.sh, judge.sh, rec-10.sh, dc-10.sh; tools/hold9.py). Members, merged one by one:
+java-ffm-1127 `4abc357a8` (FFM's JavaNioAccess and VM.isDirectMemoryPageAligned, java.xml's resources, XSLTC's translets, lambda
+frames in compiled code), java-speed-1127 `9b3f53c3e` (the Mac's 612: t05126's FileChannelImpl deadlock; the interp level under
+taskset, 612-1 (b)), java-print-1127 `ee47ce7d5` (the Mac's 610), small-rows-1127 `ded7e1d64` (the Mac's 611: sqlite3.c's print, the
+diffcheck harness's namespace bodies), py-cthreads-1127 `de740ca45` (the C world's serialized thread cost), oc-light-1127 `d73cb4a03`
+(14 :light-speed rows; its 604 carry merged: aot-cpu-caps and divergences-aot oc-light's, train 9's two OCaml holds kept),
+py-regress2-1127 at `fdcf639de` (`2422b377a`, `9758cb8e6`, `7bd8941e0`, `c68758937`, `532698694`: train 9's held rows at their causes),
+py-last6-1127 at `671a8eea9` (`e7e05baf4` sqlite's table lock, `2434f6b70` the per-thread sigmask, `16f1c72fc` with `bb1095afb` buffer
+exports, `2a913f0ee` finPendNear: Python's last six deferred rows), then mac/next `c7aebd245` (the C++ semantic checker's
+integration). go/arbace/py/finalize.ae (9758cb8e6 with 2a913f0ee) and go/arbace/pyctypes/world.ae (de740ca45 with 532698694) merged at
+the Go level (`e6c2c6522`: printed at the members' base and heads, git merge-file 3-way with no conflict, gofmt, go vet and go test
+clean, read back by bin/pyi runtime read, printed again equal to the merged Go; pytls untouched). doc/ALPINE.md names util-linux-misc
+(taskset; 612-1 (b)). The user's 610-3 (a): :print-classes' :match takes the two new kinds' texts (an early exit's finally code, a
+lambda deduplicated). LICENSE.md: an item for the foreign memory API's and java.nio's derived overlays, which none covered
+(java-design-1122's Utils, AbstractMemorySegmentImpl, LayoutPath, AbstractLayout, java-ffm's JavaNioAccess, train 10's Buffer).
+
+Java's conversion on train 8's javac tool (`javac-9a1f4720034459311183`, REPR_JAVA_STALE_OK=1), two build faults found on the way, each
+its commit (java-ffm proved its forms by `bin/jrt-convert predict`, which runs no javac step):
+- `533dd647f`: `bin/jrt-convert update`'s javac step: "getDirectBufferPool() in <anonymous java.nio.Buffer$2> does not override or
+  implement a method from a supertype": java-ffm's derived JavaNioAccess drops the method, jdk26u's Buffer.java overrode it. Buffer.java
+  a derived overlay (test/jrt/derive.ae's nio-buffer-derivation: the import and the override cut); `derive --check` 111 overlays, 0 not
+  as derived; the Go build's Buffer variant replaces the static initializer as before.
+- `5100a938a`: then "unreported exception MalformedURLException": java-ffm's ClassPathResources.namesExecutable called
+  ParseUtil.fileToEncodedURL outside a try; caught (the file: comparison decides). The javac step alone proved on the second run's tree
+  (65 s, 4.7 GB) before the third.
+Then `0c927f1c8` (jrt-convert update: Buffer.ae and ClassPathResources.ae changed, java-speed's FileChannelImpl form byte for byte the
+fresh read's), `842aefbcc` (bin/j2g-edge update: JavaNioAccess and the new forms out of jdk/edge.edn); bin/javac-vendor edge, jrt modules
+and provides unchanged; javac-vendor convert not run (no member changes javac's sources or closure); provenance-check ok; javac-vendor
+names 0 Go names twice. Built once under the big lock (HEAVY_MEM_GIB 30): KEY20 `d22de370513411678d84` at `451d5e73d`, 2 h 21 min, smoke
+ok; javac's tool `javac-5815e65e30c33941fd3b` (1 h 12 min), check --from no failures, javac-vendor verify differing only in the platform
+and ct.sym pin files and the provenance's :host (trains 4 and 8), jrt-convert verify on the fresh tool ok (java-speed's form, read by a
+stale tool's predict, the full conversion's byte for byte).
+
+On the build, before the records (py-cthreads-1127's checks, bin/pyi run): thr.py 3 of 3, errors [] 0, 53.4, 24.1 and 25.9 s (train 9:
+348 s); thr1.py 7.95 s (13.3 s); thrn.py 1 40 0.005 0 6.10 s (bound 13.2 s); thrn.py 4 10 0.005 0 7.14 s.
+
+Records:
+- Python (the coordinator: train 9's three lists and limits, 134 modules: those with a deferred or held row and the C-world-heavy ones
+  py-cthreads touches; the other 395 modules keep their earlier records; a whole run is the gate's, once the user allows gates): A (16
+  GiB, 118 modules 2 at once, then B1's 8) 23:30-01:27, P (40 GiB, HEAVY_LOCK_CAP_PCT 100, the 8 process modules one at a time under the
+  committed limits with train 9's raises) 02:11-02:30, 0 hung. Judged together: 24,733 pass, 8,466 classed, 3 regressions, 10 now pass;
+  recorded whole by --record with per-row holds (tools/hold9.py; test_crossinterp's rows kept as recorded, as trains 7 and 9). The six
+  deferred rows pass (test_memoryio's test_getbuffer_empty and test_writelines_concurrent_export, spawn's and forkserver's
+  test_poll_eintr, test_sqlite3's test_table_lock_cursor_non_readonly_select, test_tempfile's TestMktemp.test_basic), with test_coroutines'
+  test_fatal_coro_warning; train 9's held rows all ran ok (test_compile's two null-byte rows, test_weakref's union, test_del_shutdown,
+  ZoneInfoTest_Fast.test_gaps, fork's resource tracker rows, spawn's test_async_timeout, forkserver's test_interrupt). test_sys's
+  test_ioencoding_nonascii recorded as the run gives it, a skip ("requires FS encoding to match locale") as CPython's reference has it
+  (py-regress2's report: the skip follows the launching shell's locale). Held at their pass rows (train 10's regressions, owed to a later
+  train): test_xml_etree_c's BasicElementTest.test_cyclic_gc ("Dummy object ... is not None": a cycle a C element held not collected;
+  the pure-Python twin passes; suspects 532698694's mirror leaving the map, 9758cb8e6, 2a913f0ee) and spawn's
+  WithProcessesTestProcess.test_child_fd_inflation ("2 != 1 : [22, 22, 22, 25, 25]": one descriptor more in some children; suspect
+  7bd8941e0 and c68758937's compiler descriptors). Module times against train 9's run: test_datetime 1,496 -> 369 s (532698694),
+  test_pickle 1,702 -> 817 s, test_capi 468 -> 364 s, test_memoryio 34 s both, test_tempfile 24 -> 50 s (a follow-up: possibly
+  finPendNear's walk at every frame return). The classes: the 5 passing names out of :tests; :finalization-goi, :multiprocessing-children
+  and :os-and-files-misc emptied and dropped (no :match); :buffer-exports emptied, its :match kept (as train 7's guards). bin/pyi
+  divergences rc 0.
+- Java (`.tmp/t10/rec-10.sh` on the train's executable and tool, judged by `--judge --partial --record`): interp of java-ffm's 14 rows and
+  t05126 (14 pass; t03640 a timeout), t05714 t05716 t05718 under the 8-CPU cap at 600 s of CPU (612-1 (b): pass, bin/java-speed record:
+  42.7, 44.2 and 279.8 s of CPU, test/java/timeouts.txt lines 22, 23 and 140), compiled of the 16 rows and a regression sample of 20
+  passing stack-trace, StackWalker and caller-inferring logging rows for java-ffm's lambda frames (35 pass, all 20 of the sample; t03640
+  a timeout), the print level whole: interp 17 now passing, compiled 15 (t05766 among them), print 29 (610's; left t04943 for 610-1's
+  full run, t05980 and t08314 in :print-classes-unnamed, t05503 type arguments, t06125 pin casts), read 54 as recorded, 0 regressions.
+  t03640 (FFM's TestAssertWhenOuterStripMinedLoopRemoved) gets past the world and times out at both levels (603 s of CPU interpreted
+  under the cap, speed-measured.tsv): moved from :jd1123-next-train to :speed-hang and :speed-hang-compiled by the coordinator (a reclass
+  within deferred). The passing ids out of :speed-hang (t05714 t05716 t05718 t05126), :speed-hang-compiled (t05126) and
+  :jd1123-next-train (7 FFM rows); the :world classes keep their ids, as before. bin/repr-java roundtrip --corpus baseline,samples --text
+  --record: the same 47 and 7 files known at the classes level, their reasons the constant pool's order where the control flow's stores
+  were named (java-print's judge), none added or gone. bin/diffcheck whole (40 GiB ticket, 42 min, 40.6 GB peak): 12,797 of 12,802 cases
+  agree, the Java forms' pair 750 of 750 with 104 cases' classes compiled (dcf.defclass.Clj, native.nested_deftype.Host and InHost,
+  cfcorpus.c16.F2 among them), known.edn as recorded; :jforms-namespace-body emptied (cfcorpus.c11.ClojureData to :jforms-corpus-own,
+  the user's 611-1 (a)) and dropped. Not done here: bin/java-speed check fails as on next before the train (19 recorded timeouts no
+  :tests list names: t03345 ... t03747), unchanged by it.
+- C: `bin/repr-c roundtrip --corpus sqlite --record` on the build: sqlite3.c passes levels 1 and 2 (611's ded7e1d64); its level 3, the
+  oracle tier's recorded row ("print-rejected", gcc's verdict on the old print), refreshed by hand with gcc as the oracle (the
+  coordinator; ARBACE_C_JUDGE=gcc bin/repr-c roundtrip --corpus sqlite --record): gcc accepts the print, the objects differ in one
+  function, jsonEachPathLength (0x11c bytes against 0x11d: the one-line `if( JSON_LOOKUP_ISERROR(x) ) continue;` and `if( ... == p->i )
+  break;` laid over two lines, gcc -O0's branches following the lines). The user's DECISION 540-2 (2026-11-23) made that mechanism n/a for
+  shell.c; the coordinator applied 540-2 to this second instance, for the user to confirm: sqlite3.c's known class :objects-layout (its
+  :why names jsonEachPathLength), :macro-context emptied and dropped. shell.c unchanged.
+- OCaml: no rerun; oc-light's rows as its branch recorded them (bin/reap: AOT 584 / 11 / 15).
+bin/reap --record (56 of 56 cells, 0 problems): Java eval 3,222 / 0 / 31 -> 3,239 / 0 / 17, AOT 3,238 / 0 / 37 -> 3,253 / 0 / 22, print
+3,291 / 0 / 34 -> 3,320 / 0 / 5; C print 4,854 / 0 / 1 -> 4,854 / 0 / 0; OCaml AOT 570 / 11 / 29 -> 584 / 11 / 15; Python eval 43,876 / 0 / 6
+-> 43,882 / 0 / 0. bin/crops-score --record (completeness: Python 1.0000, 0 deferred; C 0.9999 -> 1.0000; Java 0.9922 -> 0.9966; OCaml
+0.9836 -> 0.9893) and --judge --strict 0 problems; records-check 0, markers ok, bin/pyi divergences rc 0. No bin/gate (the user: none
+until Python is 100%).
+The user's decisions this train applied: 605-1 (b) (test_httpservers' test_get skip-listed, unchanged), 606-1 (a) (the children by the
+compiled launcher), 606-2 (the Pool(20) variant stays: Pool(200) did not fit, train 9), 610-1 (t04943 waits for a full print run: this
+train's whole print run leaves it in :print-classes-unnamed; (b) not built), 610-3 (a), 611-1 (a), 612-1 (b), 612-2 (b) (the
+interpreter's call-path rework, task 613, deferred to after the allowance reset: t04494, t04620 and t04656 stay in :speed-hang).
+Alternatives considered: java-ffm's JavaNioAccess keeping getDirectBufferPool (it names VM.BufferPool, a nested interface jrt's VM has
+not); dropping Buffer.java from the javac step's list (the step is the closure's own check); reverting 16f1c72fc (its follow-up
+bb1095afb came first).
